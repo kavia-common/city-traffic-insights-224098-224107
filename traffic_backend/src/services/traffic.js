@@ -319,6 +319,11 @@ class TrafficStore {
    * Fetches last N persisted records (or range) from MongoDB and returns a default aggregated response:
    * { city, from, to, count, segments: [{ id, coordinates, avgSpeedKph, avgCongestion, samples }] }
    * The controller may transform this to format=points on request; this method always returns the default aggregate.
+   *
+   * Notes:
+   * - Strictly filters by city.
+   * - When from/to are not provided, retrieves the last {limit} documents sorted by timestamp desc (latest first).
+   * - Winston logs are produced at the controller layer for success/failure observability.
    */
   async getDbHistory({ fromISO, toISO, limit = 50, city = DEFAULT_CITY } = {}) {
     const normalized = normalizeCity(city);
@@ -329,6 +334,7 @@ class TrafficStore {
       if (toISO) query.timestamp.$lte = new Date(toISO);
     }
 
+    // Retrieve last "limit" records for the city, most recent first
     const cursor = TrafficRecord.find(query)
       .sort({ timestamp: -1 })
       .limit(limit);

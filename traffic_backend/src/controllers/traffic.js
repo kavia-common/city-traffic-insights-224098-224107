@@ -57,12 +57,33 @@ class TrafficController {
       try {
         data = await getDbHistory({ fromISO: from, toISO: to, limit: 50, city });
         if (data && data.count > 0) {
-          logger.info({ msg: 'DB history retrieval success', city, count: data.count, from: data.from, to: data.to });
+          logger.info({
+            msg: 'DB history retrieval success',
+            route: '/api/traffic/history',
+            mode: 'db',
+            city,
+            count: data.count,
+            from: data.from,
+            to: data.to
+          });
         } else {
-          logger.info({ msg: 'DB history empty', city, from, to });
+          logger.info({
+            msg: 'DB history empty',
+            route: '/api/traffic/history',
+            mode: 'db',
+            city,
+            from,
+            to
+          });
         }
       } catch (dbErr) {
-        logger.warn({ msg: 'DB history retrieval failed, falling back to memory', error: dbErr.message, city });
+        logger.warn({
+          msg: 'DB history retrieval failed, falling back to memory',
+          route: '/api/traffic/history',
+          mode: 'db->memory',
+          error: dbErr.message,
+          city
+        });
       }
 
       if (!data || (data && data.count === 0)) {
@@ -77,6 +98,15 @@ class TrafficController {
             densityVpkm: s.avgDensityVpkm ?? null,
             samples: s.samples ?? 0,
           }));
+          logger.info({
+            msg: 'Memory history served (points)',
+            route: '/api/traffic/history',
+            mode: 'memory',
+            city,
+            count: mem.count,
+            from: mem.from,
+            to: mem.to
+          });
           return res.status(200).json({
             city: mem.city,
             from: mem.from,
@@ -86,6 +116,15 @@ class TrafficController {
             points
           });
         }
+        logger.info({
+          msg: 'Memory history served',
+          route: '/api/traffic/history',
+          mode: 'memory',
+          city,
+          count: mem.count,
+          from: mem.from,
+          to: mem.to
+        });
         return res.status(200).json(mem);
       }
 
@@ -98,6 +137,15 @@ class TrafficController {
           densityVpkm: s.avgDensityVpkm ?? null,
           samples: s.samples ?? 0,
         }));
+        logger.info({
+          msg: 'DB history served (points)',
+          route: '/api/traffic/history',
+          mode: 'db',
+          city: data.city,
+          count: data.count,
+          from: data.from,
+          to: data.to
+        });
         return res.status(200).json({
           city: data.city,
           from: data.from,
@@ -107,9 +155,25 @@ class TrafficController {
           points
         });
       }
+      logger.info({
+        msg: 'DB history served',
+        route: '/api/traffic/history',
+        mode: 'db',
+        city: data.city,
+        count: data.count,
+        from: data.from,
+        to: data.to
+      });
       return res.status(200).json(data);
     } catch (err) {
       const status = err.status || 500;
+      logger.error({
+        msg: 'History endpoint error',
+        route: '/api/traffic/history',
+        city: req?.query?.city || DEFAULT_CITY,
+        error: err.message,
+        status
+      });
       res.status(status).json({ error: { code: err.code || 'INTERNAL', message: err.message || 'History error' } });
     }
   }
