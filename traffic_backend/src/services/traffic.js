@@ -2,8 +2,9 @@
 
 const logger = require('../logger');
 const TrafficRecord = require('../models/TrafficRecord');
+const { fetchRealTimeCity } = require('./realTrafficService');
 
-// Supported cities and their rough bounding boxes
+// Supported cities and their rough bounding boxes (used for simulation fallback)
 const CITY_BBOX = {
   Bangalore: { minLat: 12.85, maxLat: 13.12, minLng: 77.45, maxLng: 77.75 },
   Mumbai: { minLat: 18.88, maxLat: 19.30, minLng: 72.75, maxLng: 72.99 },
@@ -81,9 +82,27 @@ class TrafficStore {
     return this.cities.get(normalized);
   }
 
-  // Simulate live data based on time-of-day and random noise for a city
-  getLiveSnapshot(cityInput) {
+  /**
+   * Get live snapshot for a city.
+   * If TOMTOM_API_KEY is configured, attempts real data via TomTom; falls back to simulation on error.
+   */
+  async getLiveSnapshot(cityInput) {
     const city = normalizeCity(cityInput);
+    // Try TomTom if API key present
+    if (process.env.TOMTOM_API_KEY) {
+      try {
+        const tt = await fetchRealTimeCity(city);
+        // Keep minimal in-memory history for predictions
+        const ctx = this._ensureCity(city);
+        ctx.history.push(tt);
+        if (ctx.history.length > 500) ctx.history.splice(0, ctx.history.length - 500);
+        return tt;
+      } catch (e) {
+        logger.warn({ msg: 'TomTom real data failed, falling back to simulation', city, error: e.message });
+      }
+    }
+
+    // Simulation fallback
     const ctx = this._ensureCity(city);
 
     const now = new Date();
@@ -113,7 +132,8 @@ class TrafficStore {
     const snapshot = {
       city,
       timestamp: now.toISOString(),
-      features
+      features,
+      source: 'simulated',
     };
 
     // Store in per-city history (keep last 500)
@@ -262,9 +282,20 @@ class TrafficStore {
       gaussianPeak(minuteOfDay + horizonMinutes, 18 * 60, 120) + 0.2);
 
     // last sample for the city or synthetic
-    const latest = ctx.history[ctx.history.length - 1] || this.getLiveSnapshot(city);
+    const latest = ctx.history[ctx.history.length - 1] || null;
 
-    const features = latest.features.map(f => {
+    // If there is no history yet and real mode is enabled, try to seed it
+    const baseSnapshot = latest;
+    const features = (baseSnapshot?.features || ctx.segments.map(seg => {
+      // create a synthetic base point
+      return {
+        id: seg.id,
+        coordinates: seg.coordinates,
+        speedKph: seg.baseSpeedKph,
+        densityVpkm: seg.baseDensity,
+        congestion: 0.3,
+      };
+    })).map(f => {
       // drift a little towards upcoming pattern: more density during peak leads to lower speeds
       const driftDensity = f.densityVpkm * (0.9 + 0.3 * pattern);
       const predictedDensity = Math.max(5, driftDensity + (Math.random() - 0.5) * 2);
@@ -282,7 +313,7 @@ class TrafficStore {
 
     return {
       city,
-      timestamp: now.toISOString(),
+      timestamp: new Date().toISOString(),
       horizonMinutes,
       features
     };

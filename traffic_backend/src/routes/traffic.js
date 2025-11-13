@@ -9,7 +9,7 @@ const router = express.Router();
  * @openapi
  * /api/traffic/live:
  *   get:
- *     summary: Get live traffic snapshot (simulated)
+ *     summary: Get live traffic snapshot (real when TOMTOM_API_KEY is set, else simulated)
  *     tags: [Traffic]
  *     parameters:
  *       - in: query
@@ -17,7 +17,7 @@ const router = express.Router();
  *         schema:
  *           type: string
  *           enum: [Bangalore, Mumbai, Delhi]
- *         description: City to simulate (default Bangalore)
+ *         description: City to query (default Bangalore)
  *     responses:
  *       200:
  *         description: Live traffic data for map overlays.

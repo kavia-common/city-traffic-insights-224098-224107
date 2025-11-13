@@ -8,12 +8,12 @@ const logger = require('../logger');
  */
 class TrafficController {
   // PUBLIC_INTERFACE
-  live(req, res) {
+  async live(req, res) {
     /** Returns live traffic snapshot suitable for map overlays (LineString-like). */
     try {
       const city = normalizeCity(req.query.city);
-      const snapshot = store.getLiveSnapshot(city);
-      logger.debug({ msg: 'live snapshot generated', city: snapshot.city, count: snapshot.features.length });
+      const snapshot = await store.getLiveSnapshot(city);
+      logger.debug({ msg: 'live snapshot generated', city: snapshot.city, count: snapshot.features.length, source: snapshot.source });
       res.status(200).json(snapshot);
     } catch (err) {
       logger.error({ msg: 'live snapshot error', error: err.message });

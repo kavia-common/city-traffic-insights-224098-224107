@@ -6,7 +6,7 @@ const options = {
     info: {
       title: 'Traffic Insights API',
       version: '1.0.0',
-      description: 'Simulated live traffic, history, and predictions',
+      description: 'Live traffic, history, and predictions. When TOMTOM_API_KEY is configured, /api/traffic/live returns real TomTom Traffic Flow data; otherwise simulated data is returned. Query parameters remain unchanged.',
     },
     servers: [{ url: 'http://localhost:3001' }],
     tags: [

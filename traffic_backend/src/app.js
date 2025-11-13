@@ -69,7 +69,10 @@ const limiter = rateLimit({
 });
 app.use('/api/traffic', limiter);
 
-// Swagger Docs with dynamic server URL
+/**
+ * Swagger Docs with dynamic server URL
+ * Description notes that live endpoint uses real TomTom data when TOMTOM_API_KEY is configured.
+ */
 app.use('/api/docs', swaggerUi.serve, (req, res, next) => {
   const host = req.get('host');
   let protocol = req.secure ? 'https' : req.protocol;
@@ -78,7 +81,7 @@ app.use('/api/docs', swaggerUi.serve, (req, res, next) => {
     info: {
       ...swaggerSpec.info,
       title: 'Traffic Insights API',
-      description: 'Simulated live traffic and predictions for a sample city',
+      description: 'Live traffic, history, and predictions. When TOMTOM_API_KEY is configured, /api/traffic/live returns real TomTom data; otherwise simulated. Params unchanged.',
       version: '1.0.0'
     },
     servers: [{ url: `${protocol}://${host}` }],
