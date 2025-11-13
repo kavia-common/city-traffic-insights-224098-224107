@@ -3,7 +3,9 @@
 Traffic backend providing:
 - GET /api/health
 - GET /api/traffic/live
-- GET /api/traffic/history?from&to
+  - Response now always includes "incidents": [] (reserved for future use)
+- GET /api/traffic/history?from&to&format
+  - Supports format=points to return a simplified points array for charting
 - GET /api/traffic/predict?horizonMinutes=15
 - Swagger docs at /api/docs
 

@@ -172,6 +172,7 @@ async function fetchRealTimeCity(city) {
     city,
     timestamp: now.toISOString(),
     features: [feature],
+    incidents: [], // reserved for future real-incident integration; keep consistent shape
     source: 'tomtom',
     meta: {
       confidence: seg.confidence,

@@ -133,6 +133,7 @@ class TrafficStore {
       city,
       timestamp: now.toISOString(),
       features,
+      incidents: [], // placeholder for incident markers; ensures consistent response fields
       source: 'simulated',
     };
 
@@ -162,7 +163,13 @@ class TrafficStore {
     return snapshot;
   }
 
+  // PUBLIC_INTERFACE
   // Return aggregated history in a time range (in-memory fallback) for a city
+  /**
+   * Returns default aggregated history format:
+   * { city, from, to, count, segments: [{ id, coordinates, avgSpeedKph, avgDensityVpkm, avgCongestion, samples }] }
+   * Note: format=points is handled at controller level for response shaping; this method always returns the default aggregate.
+   */
   getHistory(fromISO, toISO, cityInput) {
     const city = normalizeCity(cityInput);
     const ctx = this._ensureCity(city);
@@ -214,8 +221,9 @@ class TrafficStore {
   // PUBLIC_INTERFACE
   async getDbHistory({ fromISO, toISO, limit = 50, city = DEFAULT_CITY } = {}) {
     /**
-     * Fetches last N persisted records (or range) from MongoDB and returns a response:
+     * Fetches last N persisted records (or range) from MongoDB and returns a default aggregated response:
      * { city, from, to, count, segments: [{ id, coordinates, avgSpeedKph, avgCongestion, samples }] }
+     * The controller may transform this to format=points on request; this method always returns the default aggregate.
      */
     const normalized = normalizeCity(city);
     const query = { city: normalized };

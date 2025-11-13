@@ -49,9 +49,15 @@ router.get('/live', trafficController.live.bind(trafficController));
  *           type: string
  *           enum: [Bangalore, Mumbai, Delhi]
  *         description: City to filter history (default Bangalore)
+ *       - in: query
+ *         name: format
+ *         schema:
+ *           type: string
+ *           enum: [points]
+ *         description: When set to 'points', returns { format: 'points', points: [{ id, coordinates, speedKph, densityVpkm, congestion, samples }] }
  *     responses:
  *       200:
- *         description: Aggregated history
+ *         description: Aggregated history or points format based on query
  *       400:
  *         description: Validation error
  */

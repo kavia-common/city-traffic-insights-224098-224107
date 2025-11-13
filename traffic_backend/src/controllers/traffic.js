@@ -13,6 +13,10 @@ class TrafficController {
     try {
       const city = normalizeCity(req.query.city);
       const snapshot = await store.getLiveSnapshot(city);
+      // Ensure incidents array exists for contract consistency
+      if (!Array.isArray(snapshot.incidents)) {
+        snapshot.incidents = [];
+      }
       logger.debug({ msg: 'live snapshot generated', city: snapshot.city, count: snapshot.features.length, source: snapshot.source });
       res.status(200).json(snapshot);
     } catch (err) {
@@ -31,6 +35,7 @@ class TrafficController {
     try {
       const { from, to } = req.query;
       const city = normalizeCity(req.query.city || DEFAULT_CITY);
+      const format = (req.query.format || '').toString().toLowerCase();
 
       if (from && isNaN(Date.parse(from))) {
         return res.status(400).json({ error: { code: 'VALIDATION_ERROR', message: 'Invalid from timestamp' } });
@@ -50,9 +55,45 @@ class TrafficController {
       if (!data || (data && data.count === 0)) {
         // Fallback to in-memory if DB not available or no records
         const mem = store.getHistory(from, to, city);
+        if (format === 'points') {
+          const points = (mem.segments || []).map(s => ({
+            id: s.id,
+            coordinates: s.coordinates,
+            speedKph: s.avgSpeedKph ?? null,
+            congestion: s.avgCongestion ?? null,
+            densityVpkm: s.avgDensityVpkm ?? null,
+            samples: s.samples ?? 0,
+          }));
+          return res.status(200).json({
+            city: mem.city,
+            from: mem.from,
+            to: mem.to,
+            count: mem.count,
+            format: 'points',
+            points
+          });
+        }
         return res.status(200).json(mem);
       }
 
+      if (format === 'points') {
+        const points = (data.segments || []).map(s => ({
+          id: s.id,
+          coordinates: s.coordinates,
+          speedKph: s.avgSpeedKph ?? null,
+          congestion: s.avgCongestion ?? null,
+          densityVpkm: s.avgDensityVpkm ?? null,
+          samples: s.samples ?? 0,
+        }));
+        return res.status(200).json({
+          city: data.city,
+          from: data.from,
+          to: data.to,
+          count: data.count,
+          format: 'points',
+          points
+        });
+      }
       return res.status(200).json(data);
     } catch (err) {
       const status = err.status || 500;
