@@ -104,6 +104,33 @@ Notes:
 - The API normalizes TomTom response into our standard features format.
 
 --------------------------------------------------------------------------------
+Deployments (Render / Railway)
+--------------------------------------------------------------------------------
+
+Render (Web Service):
+1) Create a new Web Service and point it to city-traffic-insights-224098-224107/traffic_backend
+2) Build command: npm install
+3) Start command: npm start
+4) Health Check Path: /api/health
+5) Environment variables:
+   - REACT_APP_FRONTEND_URL=https://your-frontend.vercel.app
+   - MONGO_URI=your Atlas connection string (optional)
+   - TOMTOM_API_KEY=your tomtom key (optional)
+   - REACT_APP_TRUST_PROXY=true
+   - REACT_APP_LOG_LEVEL=info
+6) Deploy, then verify /api/health and /api/docs
+
+Railway (Service):
+1) Create a new Service from the repo; set working directory to city-traffic-insights-224098-224107/traffic_backend
+2) Start command: npm start
+3) Healthcheck path: /api/health
+4) Environment variables same as above
+5) Deploy and verify
+
+CORS with Vercel frontend:
+- Set REACT_APP_FRONTEND_URL in this service to your Vercel domain precisely, e.g. https://your-project.vercel.app
+
+--------------------------------------------------------------------------------
 Troubleshooting
 --------------------------------------------------------------------------------
 CORS errors in browser (blocked by CORS):
