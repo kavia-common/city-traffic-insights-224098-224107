@@ -24,6 +24,7 @@ const config = {
   frontendOrigin: process.env.REACT_APP_FRONTEND_URL || '*',
   apiBase: process.env.REACT_APP_API_BASE || process.env.REACT_APP_BACKEND_URL || '',
   healthPath: process.env.REACT_APP_HEALTHCHECK_PATH || '/api/health',
+  mongoUri: process.env.MONGO_URI || '', // MongoDB connection string; required for persistence
   rateLimit: {
     windowMs: 60 * 1000, // 1 minute
     max: 120, // 120 req/min per IP

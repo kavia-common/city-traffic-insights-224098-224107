@@ -1,6 +1,7 @@
 'use strict';
 
 const logger = require('../logger');
+const TrafficRecord = require('../models/TrafficRecord');
 
 // Rough bounding box around Bangalore (approx)
 const BBOX = {
@@ -92,10 +93,29 @@ class TrafficStore {
       this.history.splice(0, this.history.length - 500);
     }
 
+    // Best-effort persistence to MongoDB: create one record per segment
+    // Non-blocking: do not await the full bulk insert for response path speed; log errors.
+    (async () => {
+      try {
+        const docs = snapshot.features.map(f => ({
+          segmentId: f.id,
+          location: { type: 'LineString', coordinates: f.coordinates },
+          avgSpeed: f.speedKph,
+          congestionLevel: f.congestion,
+          timestamp: new Date(snapshot.timestamp),
+          city: snapshot.city,
+        }));
+        // Use insertMany with ordered:false for resilience
+        await TrafficRecord.insertMany(docs, { ordered: false });
+      } catch (err) {
+        logger.warn({ msg: 'Persist live snapshot failed', error: err.message });
+      }
+    })();
+
     return snapshot;
   }
 
-  // Return aggregated history in a time range
+  // Return aggregated history in a time range (in-memory fallback)
   getHistory(fromISO, toISO) {
     const from = fromISO ? new Date(fromISO).getTime() : 0;
     const to = toISO ? new Date(toISO).getTime() : Date.now();
@@ -139,6 +159,66 @@ class TrafficStore {
       to: new Date(to).toISOString(),
       count: samples.length,
       segments: aggregated
+    };
+  }
+
+  // PUBLIC_INTERFACE
+  async getDbHistory({ fromISO, toISO, limit = 50, city = 'Bangalore' } = {}) {
+    /**
+     * Fetches last N persisted records (or range) from MongoDB and returns a response:
+     * { city, from, to, count, segments: [{ id, coordinates, avgSpeedKph, avgCongestion, samples }] }
+     */
+    const query = { city };
+    if (fromISO || toISO) {
+      query.timestamp = {};
+      if (fromISO) query.timestamp.$gte = new Date(fromISO);
+      if (toISO) query.timestamp.$lte = new Date(toISO);
+    }
+
+    const cursor = TrafficRecord.find(query)
+      .sort({ timestamp: -1 })
+      .limit(limit);
+
+    const docs = await cursor.exec();
+
+    // Aggregate by segmentId
+    const byId = new Map();
+    let minT = null;
+    let maxT = null;
+    for (const d of docs) {
+      const id = d.segmentId;
+      const ts = d.timestamp.getTime();
+      if (minT === null || ts < minT) minT = ts;
+      if (maxT === null || ts > maxT) maxT = ts;
+
+      const v = byId.get(id) || {
+        id,
+        coordinates: d.location?.coordinates || [],
+        speedSum: 0,
+        congestionSum: 0,
+        n: 0,
+      };
+      v.speedSum += d.avgSpeed;
+      v.congestionSum += d.congestionLevel;
+      v.n += 1;
+      // prefer to keep coordinates as first seen
+      byId.set(id, v);
+    }
+
+    const segments = Array.from(byId.values()).map(v => ({
+      id: v.id,
+      coordinates: v.coordinates,
+      avgSpeedKph: v.n ? Number((v.speedSum / v.n).toFixed(2)) : null,
+      avgCongestion: v.n ? Number((v.congestionSum / v.n).toFixed(3)) : null,
+      samples: v.n
+    }));
+
+    return {
+      city,
+      from: minT ? new Date(minT).toISOString() : (fromISO || null),
+      to: maxT ? new Date(maxT).toISOString() : (toISO || null),
+      count: docs.length,
+      segments
     };
   }
 
@@ -187,4 +267,5 @@ const store = new TrafficStore();
 
 module.exports = {
   store,
+  getDbHistory: store.getDbHistory.bind(store),
 };

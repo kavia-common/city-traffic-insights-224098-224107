@@ -19,7 +19,8 @@
     "morgan": "^1.10.0",
     "swagger-jsdoc": "^6.2.8",
     "swagger-ui-express": "^5.0.1",
-    "winston": "^3.13.0"
+    "winston": "^3.13.0",
+    "mongoose": "^8.8.2"
   },
   "devDependencies": {
     "eslint": "^9.24.0",

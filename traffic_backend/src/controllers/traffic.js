@@ -1,6 +1,6 @@
 'use strict';
 
-const { store } = require('../services/traffic');
+const { store, getDbHistory } = require('../services/traffic');
 const logger = require('../logger');
 
 /**
@@ -21,8 +21,11 @@ class TrafficController {
   }
 
   // PUBLIC_INTERFACE
-  history(req, res) {
-    /** Returns aggregated traffic history between from and to ISO timestamps */
+  async history(req, res) {
+    /**
+     * Returns recent traffic history. If from/to provided, filters by timestamps.
+     * Primary source: MongoDB last 50 records (sorted desc). Fallback: in-memory aggregation.
+     */
     try {
       const { from, to } = req.query;
 
@@ -32,8 +35,23 @@ class TrafficController {
       if (to && isNaN(Date.parse(to))) {
         return res.status(400).json({ error: { code: 'VALIDATION_ERROR', message: 'Invalid to timestamp' } });
       }
-      const data = store.getHistory(from, to);
-      res.status(200).json(data);
+
+      // Try DB-backed history
+      let data = null;
+      try {
+        data = await getDbHistory({ fromISO: from, toISO: to, limit: 50, city: 'Bangalore' });
+      } catch (dbErr) {
+        logger.warn({ msg: 'DB history retrieval failed, falling back to memory', error: dbErr.message });
+      }
+
+      if (!data || (data && data.count === 0)) {
+        // Fallback to in-memory if DB not available or no records
+        const mem = store.getHistory(from, to);
+        // Align shape roughly (avgDensity absent in DB aggregation; keep mem fields)
+        return res.status(200).json(mem);
+      }
+
+      return res.status(200).json(data);
     } catch (err) {
       const status = err.status || 500;
       res.status(status).json({ error: { code: err.code || 'INTERNAL', message: err.message || 'History error' } });

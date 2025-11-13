@@ -13,9 +13,14 @@ const logger = require('./logger');
 const healthController = require('./controllers/health');
 const trafficRoutes = require('./routes/traffic');
 const routes = require('./routes');
+const mongoClient = require('./db/mongo');
 
-// Initialize express app
+/**
+ * Initialize express app and DB connections.
+ */
 const app = express();
+// Initialize Mongo (non-blocking; app continues if connect fails)
+mongoClient.connect();
 
 // Trust proxy (behind load balancers)
 app.set('trust proxy', config.trustProxy);

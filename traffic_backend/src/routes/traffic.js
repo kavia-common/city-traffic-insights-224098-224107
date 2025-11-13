@@ -21,7 +21,7 @@ router.get('/live', trafficController.live.bind(trafficController));
  * @openapi
  * /api/traffic/history:
  *   get:
- *     summary: Get aggregated traffic history between timestamps
+ *     summary: Get traffic history (DB-backed). Returns last 50 records by default or a filtered range.
  *     tags: [Traffic]
  *     parameters:
  *       - in: query
