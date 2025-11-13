@@ -11,6 +11,13 @@ const router = express.Router();
  *   get:
  *     summary: Get live traffic snapshot (simulated)
  *     tags: [Traffic]
+ *     parameters:
+ *       - in: query
+ *         name: city
+ *         schema:
+ *           type: string
+ *           enum: [Bangalore, Mumbai, Delhi]
+ *         description: City to simulate (default Bangalore)
  *     responses:
  *       200:
  *         description: Live traffic data for map overlays.
@@ -36,6 +43,12 @@ router.get('/live', trafficController.live.bind(trafficController));
  *           type: string
  *           format: date-time
  *         description: ISO timestamp end
+ *       - in: query
+ *         name: city
+ *         schema:
+ *           type: string
+ *           enum: [Bangalore, Mumbai, Delhi]
+ *         description: City to filter history (default Bangalore)
  *     responses:
  *       200:
  *         description: Aggregated history
@@ -58,6 +71,12 @@ router.get('/history', trafficController.history.bind(trafficController));
  *           minimum: 1
  *           maximum: 120
  *         description: Prediction horizon in minutes (default 15)
+ *       - in: query
+ *         name: city
+ *         schema:
+ *           type: string
+ *           enum: [Bangalore, Mumbai, Delhi]
+ *         description: City to simulate (default Bangalore)
  *     responses:
  *       200:
  *         description: Predicted traffic snapshot

@@ -3,22 +3,33 @@
 const logger = require('../logger');
 const TrafficRecord = require('../models/TrafficRecord');
 
-// Rough bounding box around Bangalore (approx)
-const BBOX = {
-  minLat: 12.85,
-  maxLat: 13.12,
-  minLng: 77.45,
-  maxLng: 77.75
+// Supported cities and their rough bounding boxes
+const CITY_BBOX = {
+  Bangalore: { minLat: 12.85, maxLat: 13.12, minLng: 77.45, maxLng: 77.75 },
+  Mumbai: { minLat: 18.88, maxLat: 19.30, minLng: 72.75, maxLng: 72.99 },
+  Delhi: { minLat: 28.40, maxLat: 28.88, minLng: 76.90, maxLng: 77.40 },
 };
 
-// Build a set of simulated road segments between random nearby coordinates
-function generateSegments(seed = 24) {
+const DEFAULT_CITY = 'Bangalore';
+
+function normalizeCity(input) {
+  if (!input) return DEFAULT_CITY;
+  const v = String(input).trim().toLowerCase();
+  if (v === 'bangalore' || v === 'blr') return 'Bangalore';
+  if (v === 'mumbai' || v === 'bom') return 'Mumbai';
+  if (v === 'delhi' || v === 'ncr') return 'Delhi';
+  return DEFAULT_CITY;
+}
+
+// Build a set of simulated road segments between random nearby coordinates for a city
+function generateSegmentsForCity(city, seed = 24) {
+  const bbox = CITY_BBOX[city] || CITY_BBOX[DEFAULT_CITY];
   const segments = [];
   const rng = mulberry32(seed);
-  const count = 120; // number of segments for decent coverage
+  const count = 120; // number of segments for decent coverage per city
   for (let i = 0; i < count; i++) {
-    const lat1 = lerp(BBOX.minLat, BBOX.maxLat, rng());
-    const lng1 = lerp(BBOX.minLng, BBOX.maxLng, rng());
+    const lat1 = lerp(bbox.minLat, bbox.maxLat, rng());
+    const lng1 = lerp(bbox.minLng, bbox.maxLng, rng());
     const lat2 = lat1 + (rng() - 0.5) * 0.01; // ~1km variation
     const lng2 = lng1 + (rng() - 0.5) * 0.01;
 
@@ -48,15 +59,33 @@ function mulberry32(a) {
 
 function lerp(a, b, t) { return a + (b - a) * t; }
 
-// In-memory datastore for the session
+// In-memory datastore keyed by city for the session
 class TrafficStore {
   constructor() {
-    this.segments = generateSegments(Date.now() % 100000);
-    this.history = []; // { timestamp, features: [...] }
+    this.cities = new Map(); // city -> { segments, history: [] }
+    // Pre-seed supported cities for deterministic segment generation per city
+    for (const city of Object.keys(CITY_BBOX)) {
+      this._ensureCity(city);
+    }
   }
 
-  // Simulate live data based on time-of-day and random noise
-  getLiveSnapshot() {
+  _ensureCity(city) {
+    const normalized = normalizeCity(city);
+    if (!this.cities.has(normalized)) {
+      const seed = (Date.now() % 100000) + normalized.length * 9973;
+      this.cities.set(normalized, {
+        segments: generateSegmentsForCity(normalized, seed),
+        history: []
+      });
+    }
+    return this.cities.get(normalized);
+  }
+
+  // Simulate live data based on time-of-day and random noise for a city
+  getLiveSnapshot(cityInput) {
+    const city = normalizeCity(cityInput);
+    const ctx = this._ensureCity(city);
+
     const now = new Date();
     const minuteOfDay = now.getHours() * 60 + now.getMinutes();
 
@@ -65,7 +94,7 @@ class TrafficStore {
     const peak2 = gaussianPeak(minuteOfDay, 18 * 60, 120);
     const pattern = Math.min(1, peak1 + peak2 + 0.2); // ensure some base flow
 
-    const features = this.segments.map(seg => {
+    const features = ctx.segments.map(seg => {
       const noise = (Math.random() - 0.5) * 0.2;
       const density = Math.max(5, seg.baseDensity * (0.6 + pattern + noise)); // vehicles/km
       // Simple speed model inverse to density
@@ -82,19 +111,18 @@ class TrafficStore {
     });
 
     const snapshot = {
-      city: 'Bangalore',
+      city,
       timestamp: now.toISOString(),
       features
     };
 
-    // Store in history (keep last 500)
-    this.history.push(snapshot);
-    if (this.history.length > 500) {
-      this.history.splice(0, this.history.length - 500);
+    // Store in per-city history (keep last 500)
+    ctx.history.push(snapshot);
+    if (ctx.history.length > 500) {
+      ctx.history.splice(0, ctx.history.length - 500);
     }
 
     // Best-effort persistence to MongoDB: create one record per segment
-    // Non-blocking: do not await the full bulk insert for response path speed; log errors.
     (async () => {
       try {
         const docs = snapshot.features.map(f => ({
@@ -105,7 +133,6 @@ class TrafficStore {
           timestamp: new Date(snapshot.timestamp),
           city: snapshot.city,
         }));
-        // Use insertMany with ordered:false for resilience
         await TrafficRecord.insertMany(docs, { ordered: false });
       } catch (err) {
         logger.warn({ msg: 'Persist live snapshot failed', error: err.message });
@@ -115,8 +142,10 @@ class TrafficStore {
     return snapshot;
   }
 
-  // Return aggregated history in a time range (in-memory fallback)
-  getHistory(fromISO, toISO) {
+  // Return aggregated history in a time range (in-memory fallback) for a city
+  getHistory(fromISO, toISO, cityInput) {
+    const city = normalizeCity(cityInput);
+    const ctx = this._ensureCity(city);
     const from = fromISO ? new Date(fromISO).getTime() : 0;
     const to = toISO ? new Date(toISO).getTime() : Date.now();
     if (Number.isNaN(from) || Number.isNaN(to)) {
@@ -126,7 +155,7 @@ class TrafficStore {
       throw err;
     }
 
-    const samples = this.history.filter(s => {
+    const samples = ctx.history.filter(s => {
       const t = new Date(s.timestamp).getTime();
       return t >= from && t <= to;
     });
@@ -154,7 +183,7 @@ class TrafficStore {
     }));
 
     return {
-      city: 'Bangalore',
+      city,
       from: new Date(from).toISOString(),
       to: new Date(to).toISOString(),
       count: samples.length,
@@ -163,12 +192,13 @@ class TrafficStore {
   }
 
   // PUBLIC_INTERFACE
-  async getDbHistory({ fromISO, toISO, limit = 50, city = 'Bangalore' } = {}) {
+  async getDbHistory({ fromISO, toISO, limit = 50, city = DEFAULT_CITY } = {}) {
     /**
      * Fetches last N persisted records (or range) from MongoDB and returns a response:
      * { city, from, to, count, segments: [{ id, coordinates, avgSpeedKph, avgCongestion, samples }] }
      */
-    const query = { city };
+    const normalized = normalizeCity(city);
+    const query = { city: normalized };
     if (fromISO || toISO) {
       query.timestamp = {};
       if (fromISO) query.timestamp.$gte = new Date(fromISO);
@@ -214,7 +244,7 @@ class TrafficStore {
     }));
 
     return {
-      city,
+      city: normalized,
       from: minT ? new Date(minT).toISOString() : (fromISO || null),
       to: maxT ? new Date(maxT).toISOString() : (toISO || null),
       count: docs.length,
@@ -223,14 +253,16 @@ class TrafficStore {
   }
 
   // Very simple prediction: trend + time-of-day pattern adjustment
-  predictShortTerm(horizonMinutes = 15) {
+  predictShortTerm(horizonMinutes = 15, cityInput) {
+    const city = normalizeCity(cityInput);
+    const ctx = this._ensureCity(city);
     const now = new Date();
     const minuteOfDay = now.getHours() * 60 + now.getMinutes();
     const pattern = Math.min(1, gaussianPeak(minuteOfDay + horizonMinutes, 9 * 60, 120) +
       gaussianPeak(minuteOfDay + horizonMinutes, 18 * 60, 120) + 0.2);
 
-    // last sample or synthetic
-    const latest = this.history[this.history.length - 1] || this.getLiveSnapshot();
+    // last sample for the city or synthetic
+    const latest = ctx.history[ctx.history.length - 1] || this.getLiveSnapshot(city);
 
     const features = latest.features.map(f => {
       // drift a little towards upcoming pattern: more density during peak leads to lower speeds
@@ -249,7 +281,7 @@ class TrafficStore {
     });
 
     return {
-      city: 'Bangalore',
+      city,
       timestamp: now.toISOString(),
       horizonMinutes,
       features
@@ -268,4 +300,6 @@ const store = new TrafficStore();
 module.exports = {
   store,
   getDbHistory: store.getDbHistory.bind(store),
+  normalizeCity,
+  DEFAULT_CITY,
 };

@@ -1,6 +1,6 @@
 'use strict';
 
-const { store, getDbHistory } = require('../services/traffic');
+const { store, getDbHistory, normalizeCity, DEFAULT_CITY } = require('../services/traffic');
 const logger = require('../logger');
 
 /**
@@ -11,8 +11,9 @@ class TrafficController {
   live(req, res) {
     /** Returns live traffic snapshot suitable for map overlays (LineString-like). */
     try {
-      const snapshot = store.getLiveSnapshot();
-      logger.debug({ msg: 'live snapshot generated', count: snapshot.features.length });
+      const city = normalizeCity(req.query.city);
+      const snapshot = store.getLiveSnapshot(city);
+      logger.debug({ msg: 'live snapshot generated', city: snapshot.city, count: snapshot.features.length });
       res.status(200).json(snapshot);
     } catch (err) {
       logger.error({ msg: 'live snapshot error', error: err.message });
@@ -25,9 +26,11 @@ class TrafficController {
     /**
      * Returns recent traffic history. If from/to provided, filters by timestamps.
      * Primary source: MongoDB last 50 records (sorted desc). Fallback: in-memory aggregation.
+     * Supports city filter (?city=Bangalore|Mumbai|Delhi), default Bangalore.
      */
     try {
       const { from, to } = req.query;
+      const city = normalizeCity(req.query.city || DEFAULT_CITY);
 
       if (from && isNaN(Date.parse(from))) {
         return res.status(400).json({ error: { code: 'VALIDATION_ERROR', message: 'Invalid from timestamp' } });
@@ -39,15 +42,14 @@ class TrafficController {
       // Try DB-backed history
       let data = null;
       try {
-        data = await getDbHistory({ fromISO: from, toISO: to, limit: 50, city: 'Bangalore' });
+        data = await getDbHistory({ fromISO: from, toISO: to, limit: 50, city });
       } catch (dbErr) {
-        logger.warn({ msg: 'DB history retrieval failed, falling back to memory', error: dbErr.message });
+        logger.warn({ msg: 'DB history retrieval failed, falling back to memory', error: dbErr.message, city });
       }
 
       if (!data || (data && data.count === 0)) {
         // Fallback to in-memory if DB not available or no records
-        const mem = store.getHistory(from, to);
-        // Align shape roughly (avgDensity absent in DB aggregation; keep mem fields)
+        const mem = store.getHistory(from, to, city);
         return res.status(200).json(mem);
       }
 
@@ -60,7 +62,7 @@ class TrafficController {
 
   // PUBLIC_INTERFACE
   predict(req, res) {
-    /** Returns short-term predicted traffic for given horizonMinutes (default 15) */
+    /** Returns short-term predicted traffic for given horizonMinutes (default 15) with city selection */
     try {
       const horizonStr = req.query.horizonMinutes;
       let horizon = 15;
@@ -71,7 +73,8 @@ class TrafficController {
         }
         horizon = Math.floor(parsed);
       }
-      const data = store.predictShortTerm(horizon);
+      const city = normalizeCity(req.query.city || DEFAULT_CITY);
+      const data = store.predictShortTerm(horizon, city);
       res.status(200).json(data);
     } catch (err) {
       res.status(500).json({ error: { message: 'Prediction error' } });
