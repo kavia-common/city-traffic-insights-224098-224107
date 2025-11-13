@@ -179,8 +179,11 @@ class TrafficController {
   }
 
   // PUBLIC_INTERFACE
-  predict(req, res) {
-    /** Returns short-term predicted traffic for given horizonMinutes (default 15) with city selection */
+  async predict(req, res) {
+    /** Returns short-term predicted traffic for given horizonMinutes (default 15) with city selection.
+     * Uses trend-based projection from last up to 10 samples (per city/segment) with 5-minute intervals.
+     * Falls back to simulated predictor if DB and memory are empty.
+     */
     try {
       const horizonStr = req.query.horizonMinutes;
       let horizon = 15;
@@ -196,9 +199,27 @@ class TrafficController {
         return res.status(400).json({ error: { code: 'VALIDATION_ERROR', message: v.error } });
       }
       const city = v.normalized || normalizeCity(req.query.city || DEFAULT_CITY);
-      const data = store.predictShortTerm(horizon, city);
+
+      // Delegate to services layer trend predictor
+      const data = await store.predictTrendBased(horizon, city);
+
+      logger.info({
+        msg: 'Prediction served',
+        route: '/api/traffic/predict',
+        city,
+        horizonMinutes: horizon,
+        mode: data?.meta?.mode || 'unknown',
+        pointsPerSeries: data?.timeSeries?.[0]?.points?.length || 0
+      });
+
       res.status(200).json(data);
     } catch (err) {
+      logger.error({
+        msg: 'Prediction endpoint error',
+        route: '/api/traffic/predict',
+        city: req?.query?.city || DEFAULT_CITY,
+        error: err.message
+      });
       res.status(500).json({ error: { message: 'Prediction error' } });
     }
   }

@@ -22,7 +22,9 @@ const DEFAULT_CITY = 'Bangalore';
  * normalizeCity
  * Normalize a city input into one of the supported enum values.
  */
+// PUBLIC_INTERFACE
 function normalizeCity(input) {
+  /** Normalize raw input to one of: Bangalore, Mumbai, Delhi */
   if (!input) return DEFAULT_CITY;
   const v = String(input).trim().toLowerCase();
   if (v === 'bangalore' || v === 'blr') return 'Bangalore';
@@ -37,7 +39,9 @@ function normalizeCity(input) {
  * Validate raw city input against allowed enum values.
  * Returns { valid: boolean, normalized?: string, error?: string }
  */
+// PUBLIC_INTERFACE
 function validateCity(raw) {
+  /** Validate city and return normalized city or error */
   if (raw === undefined || raw === null || String(raw).trim() === '') {
     // Missing means default is allowed
     return { valid: true, normalized: DEFAULT_CITY };
@@ -213,7 +217,9 @@ class TrafficStore {
    * - In real mode (TOMTOM_API_KEY set), fetches on demand from TomTom and updates memory/history.
    * - In simulation mode, returns the latest scheduled snapshot (or generates one immediately if none).
    */
+  // PUBLIC_INTERFACE
   async getLiveSnapshot(cityInput) {
+    /** Returns live snapshot either from TomTom or simulated with persistence */
     const city = normalizeCity(cityInput);
 
     // Real data mode: on-demand fetch, then persist and record history
@@ -265,7 +271,9 @@ class TrafficStore {
    * { city, from, to, count, segments: [{ id, coordinates, avgSpeedKph, avgDensityVpkm, avgCongestion, samples }] }
    * Note: format=points is handled at controller level for response shaping; this method always returns the default aggregate.
    */
+  // PUBLIC_INTERFACE
   getHistory(fromISO, toISO, cityInput) {
+    /** Returns aggregated history from in-memory store for given time range and city */
     const city = normalizeCity(cityInput);
     const ctx = this._ensureCity(city);
     const from = fromISO ? new Date(fromISO).getTime() : 0;
@@ -325,7 +333,9 @@ class TrafficStore {
    * - When from/to are not provided, retrieves the last {limit} documents sorted by timestamp desc (latest first).
    * - Winston logs are produced at the controller layer for success/failure observability.
    */
+  // PUBLIC_INTERFACE
   async getDbHistory({ fromISO, toISO, limit = 50, city = DEFAULT_CITY } = {}) {
+    /** Query MongoDB for persisted records and aggregate by segment */
     const normalized = normalizeCity(city);
     const query = { city: normalized };
     if (fromISO || toISO) {
@@ -386,7 +396,9 @@ class TrafficStore {
    * predictShortTerm
    * Very simple prediction: trend + time-of-day pattern adjustment with slight random drift.
    */
+  // PUBLIC_INTERFACE
   predictShortTerm(horizonMinutes = 15, cityInput) {
+    /** Simple simulated predictor used as fallback */
     const city = normalizeCity(cityInput);
     const ctx = this._ensureCity(city);
     const now = new Date();
@@ -428,12 +440,216 @@ class TrafficStore {
       features
     };
   }
+
+  /**
+   * PUBLIC_INTERFACE
+   * predictTrendBased
+   * Uses last up to 10 data points per segment (DB preferred, fallback to memory) to project
+   * next horizonMinutes in 5-minute intervals using simple linear regression, with a moving
+   * average fallback when insufficient variance. Returns a shape compatible with existing
+   * predict response and includes a timeSeries array for UI charts.
+   */
+  // PUBLIC_INTERFACE
+  async predictTrendBased(horizonMinutes = 15, cityInput) {
+    /** Trend-based predictor using last up to 10 points per segment; DB first, memory fallback */
+    const city = normalizeCity(cityInput);
+    const ctx = this._ensureCity(city);
+
+    const stepMin = 5;
+    const steps = Math.max(1, Math.floor(horizonMinutes / stepMin));
+
+    // Collect last up to 10 points per segment from DB (best effort)
+    let historyById = null;
+    try {
+      historyById = await this._collectRecentFromDb(city, 10);
+      logger.info({ msg: 'Predictor DB history collected', city, segments: Object.keys(historyById || {}).length });
+    } catch (e) {
+      logger.warn({ msg: 'Predictor DB history failed, will use memory', city, error: e.message });
+    }
+
+    if (!historyById || Object.keys(historyById).length === 0) {
+      historyById = this._collectRecentFromMemory(ctx, 10);
+      logger.info({ msg: 'Predictor using in-memory history', city, segments: Object.keys(historyById).length });
+    }
+
+    // If still empty (cold start), fallback to simulated simple predictor
+    if (!historyById || Object.keys(historyById).length === 0) {
+      logger.warn({ msg: 'Predictor no history available; using simulated fallback', city });
+      const fallback = this.predictShortTerm(horizonMinutes, city);
+      return {
+        ...fallback,
+        meta: { mode: 'fallback-simulated', stepMinutes: stepMin }
+      };
+    }
+
+    // Build timeSeries for each segment
+    const now = Date.now();
+    const series = [];
+    const finalFeatureById = new Map();
+
+    for (const [segId, samples] of Object.entries(historyById)) {
+      // Keep coordinates from latest known sample or from static segments
+      const coord = samples[samples.length - 1]?.coordinates || ctx.segments.find(s => s.id === segId)?.coordinates || [];
+
+      const speedSeries = buildRegressionSeries(samples.map(s => ({ t: s.t, v: s.speedKph })), now, stepMin, steps);
+      const densitySeries = buildRegressionSeries(samples.map(s => ({ t: s.t, v: s.densityVpkm })), now, stepMin, steps);
+
+      // Derive congestion per step using same heuristic as elsewhere
+      const points = [];
+      for (let i = 0; i < steps; i++) {
+        const ts = new Date(now + (i + 1) * stepMin * 60_000).toISOString();
+        const speed = Math.max(5, round2(speedSeries[i] ?? samples[samples.length - 1]?.speedKph ?? 30));
+        const density = Math.max(5, round2(densitySeries[i] ?? samples[samples.length - 1]?.densityVpkm ?? 15));
+        const rawCong = (density / 80 + (1 - speed / 80)) / 2;
+        const congestion = clamp01(round3(rawCong));
+        points.push({ timestamp: ts, speedKph: speed, densityVpkm: density, congestion });
+      }
+
+      series.push({ id: segId, coordinates: coord, points });
+
+      // Final feature equals last point in series
+      const last = points[points.length - 1];
+      finalFeatureById.set(segId, {
+        id: segId,
+        coordinates: coord,
+        speedKph: last.speedKph,
+        densityVpkm: last.densityVpkm,
+        congestion: last.congestion,
+      });
+    }
+
+    const features = Array.from(finalFeatureById.values());
+
+    return {
+      city,
+      timestamp: new Date().toISOString(),
+      horizonMinutes,
+      stepMinutes: stepMin,
+      features, // retain compatibility for map overlay at horizon end
+      timeSeries: series,
+      meta: { mode: 'trend', segments: features.length }
+    };
+  }
+
+  // Collect recent samples (up to N per segment) from MongoDB
+  async _collectRecentFromDb(city, n = 10) {
+    const normalized = normalizeCity(city);
+    // Get enough rows to fill N per segment
+    const docs = await TrafficRecord.find({ city: normalized })
+      .sort({ timestamp: -1 })
+      .limit(1000) // grab enough to build per-segment last N
+      .exec();
+
+    const byId = new Map();
+    for (const d of docs) {
+      const id = d.segmentId;
+      const arr = byId.get(id) || [];
+      if (arr.length < n) {
+        arr.push({
+          t: d.timestamp.getTime(),
+          speedKph: Number(d.avgSpeed),
+          densityVpkm: undefined, // not stored in DB; will infer
+          coordinates: d.location?.coordinates || []
+        });
+        byId.set(id, arr);
+      }
+    }
+
+    // Infer density from speed (approximation) if missing
+    const out = {};
+    byId.forEach((arr, id) => {
+      const normalizedArr = arr
+        .sort((a, b) => a.t - b.t)
+        .map(s => ({
+          ...s,
+          densityVpkm: Number.isFinite(s.densityVpkm) ? s.densityVpkm : round2(80 / Math.max(5, s.speedKph))
+        }));
+      out[id] = normalizedArr;
+    });
+    return out;
+  }
+
+  // Collect recent samples (up to N per segment) from in-memory history for a city
+  _collectRecentFromMemory(ctx, n = 10) {
+    const byId = new Map();
+    const hist = ctx.history || [];
+    // Traverse from latest backwards
+    for (let i = hist.length - 1; i >= 0; i--) {
+      const s = hist[i];
+      const t = new Date(s.timestamp).getTime();
+      for (const f of s.features) {
+        const arr = byId.get(f.id) || [];
+        if (arr.length < n) {
+          arr.push({ t, speedKph: f.speedKph, densityVpkm: f.densityVpkm, coordinates: f.coordinates });
+          byId.set(f.id, arr);
+        }
+      }
+      // Stop early if all segments reached N
+      let allN = true;
+      for (const seg of ctx.segments) {
+        const arr = byId.get(seg.id) || [];
+        if (arr.length < n) { allN = false; break; }
+      }
+      if (allN) break;
+    }
+
+    const out = {};
+    byId.forEach((arr, id) => {
+      out[id] = arr.sort((a, b) => a.t - b.t);
+    });
+    return out;
+  }
 }
 
 // Gaussian-like peak function
 function gaussianPeak(x, center, width) {
   const diff = x - center;
   return Math.exp(-(diff * diff) / (2 * width * width));
+}
+
+// Helpers for regression and bounds
+function round2(v) { return Math.round(v * 100) / 100; }
+function round3(v) { return Math.round(v * 1000) / 1000; }
+function clamp01(v) { return Math.max(0, Math.min(1, v)); }
+
+/** Build future series using simple linear regression (time vs value). If fewer than 2 points,
+ * repeats last value. When variance is near-zero, uses moving average as trend.
+ */
+function buildRegressionSeries(samples, nowMs, stepMin, steps) {
+  const n = samples?.length || 0;
+  if (!samples || n === 0) return new Array(steps).fill(null);
+  if (n === 1) return new Array(steps).fill(samples[0].v);
+
+  // Normalize time to minutes relative to first sample to improve stability
+  const t0 = samples[0].t;
+  const xs = samples.map(s => (s.t - t0) / 60000); // minutes
+  const ys = samples.map(s => s.v);
+
+  const xMean = xs.reduce((a, b) => a + b, 0) / n;
+  const yMean = ys.reduce((a, b) => a + b, 0) / n;
+  let num = 0; let den = 0;
+  for (let i = 0; i < n; i++) {
+    num += (xs[i] - xMean) * (ys[i] - yMean);
+    den += (xs[i] - xMean) * (xs[i] - xMean);
+  }
+  const slope = den === 0 ? 0 : (num / den);
+  const intercept = yMean - slope * xMean;
+
+  // If variance very small, fallback to moving average
+  const variance = ys.reduce((acc, v) => acc + (v - yMean) * (v - yMean), 0) / n;
+  const useMA = variance < 1e-6 && Math.abs(slope) < 1e-6;
+  const ma = yMean;
+
+  const result = [];
+  const lastX = (samples[n - 1].t - t0) / 60000;
+  for (let i = 1; i <= steps; i++) {
+    const futureT = ((nowMs - t0) / 60000) + i * stepMin;
+    let v = useMA ? ma : (intercept + slope * Math.max(futureT, lastX));
+    // Keep reasonable bounds
+    if (!Number.isFinite(v)) v = ma;
+    result.push(v);
+  }
+  return result;
 }
 
 const store = new TrafficStore();
