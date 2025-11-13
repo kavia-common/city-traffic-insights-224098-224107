@@ -10,17 +10,18 @@ const router = express.Router();
  * /api/traffic/live:
  *   get:
  *     summary: Get live traffic snapshot (real when TOMTOM_API_KEY is set, else simulated)
+ *     description: |
+ *       Returns a live traffic snapshot for the requested city. When TOMTOM_API_KEY is configured,
+ *       the snapshot is sourced from TomTom Traffic Flow; otherwise it is simulated. The "incidents" array
+ *       is always present (reserved for future use).
  *     tags: [Traffic]
  *     parameters:
- *       - in: query
- *         name: city
- *         schema:
- *           type: string
- *           enum: [Bangalore, Mumbai, Delhi]
- *         description: City to query (default Bangalore)
+ *       - $ref: '#/components/parameters/CityParam'
  *     responses:
  *       200:
  *         description: Live traffic data for map overlays.
+ *       400:
+ *         description: Validation error (e.g., invalid city)
  */
 router.get('/live', trafficController.live.bind(trafficController));
 
@@ -29,6 +30,9 @@ router.get('/live', trafficController.live.bind(trafficController));
  * /api/traffic/history:
  *   get:
  *     summary: Get traffic history (DB-backed). Returns last 50 records by default or a filtered range.
+ *     description: |
+ *       If MongoDB is configured, returns aggregated history from the last 50 persisted records by default,
+ *       or filters by time range when `from`/`to` are provided. Falls back to in-memory aggregation when DB is not available.
  *     tags: [Traffic]
  *     parameters:
  *       - in: query
@@ -43,12 +47,7 @@ router.get('/live', trafficController.live.bind(trafficController));
  *           type: string
  *           format: date-time
  *         description: ISO timestamp end
- *       - in: query
- *         name: city
- *         schema:
- *           type: string
- *           enum: [Bangalore, Mumbai, Delhi]
- *         description: City to filter history (default Bangalore)
+ *       - $ref: '#/components/parameters/CityParam'
  *       - in: query
  *         name: format
  *         schema:
@@ -59,7 +58,7 @@ router.get('/live', trafficController.live.bind(trafficController));
  *       200:
  *         description: Aggregated history or points format based on query
  *       400:
- *         description: Validation error
+ *         description: Validation error (e.g., invalid city or invalid timestamps)
  */
 router.get('/history', trafficController.history.bind(trafficController));
 
@@ -68,6 +67,9 @@ router.get('/history', trafficController.history.bind(trafficController));
  * /api/traffic/predict:
  *   get:
  *     summary: Get short-term traffic predictions (simulated)
+ *     description: |
+ *       Returns predicted traffic for the specified horizon in minutes for a given city.
+ *       Horizon must be within 1..120 minutes. City must be one of the allowed enum values.
  *     tags: [Traffic]
  *     parameters:
  *       - in: query
@@ -77,17 +79,12 @@ router.get('/history', trafficController.history.bind(trafficController));
  *           minimum: 1
  *           maximum: 120
  *         description: Prediction horizon in minutes (default 15)
- *       - in: query
- *         name: city
- *         schema:
- *           type: string
- *           enum: [Bangalore, Mumbai, Delhi]
- *         description: City to simulate (default Bangalore)
+ *       - $ref: '#/components/parameters/CityParam'
  *     responses:
  *       200:
  *         description: Predicted traffic snapshot
  *       400:
- *         description: Validation error
+ *         description: Validation error (e.g., invalid horizon or city)
  */
 router.get('/predict', trafficController.predict.bind(trafficController));
 

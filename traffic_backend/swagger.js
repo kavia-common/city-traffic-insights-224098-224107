@@ -22,7 +22,7 @@ const options = {
             type: 'string',
             enum: ['Bangalore', 'Mumbai', 'Delhi']
           },
-          description: 'City to query (default Bangalore)'
+          description: 'City to query (default Bangalore). Must be one of: Bangalore, Mumbai, Delhi.'
         }
       }
     }
