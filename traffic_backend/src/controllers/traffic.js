@@ -56,6 +56,11 @@ class TrafficController {
       let data = null;
       try {
         data = await getDbHistory({ fromISO: from, toISO: to, limit: 50, city });
+        if (data && data.count > 0) {
+          logger.info({ msg: 'DB history retrieval success', city, count: data.count, from: data.from, to: data.to });
+        } else {
+          logger.info({ msg: 'DB history empty', city, from, to });
+        }
       } catch (dbErr) {
         logger.warn({ msg: 'DB history retrieval failed, falling back to memory', error: dbErr.message, city });
       }

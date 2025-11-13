@@ -136,7 +136,7 @@ class TrafficStore {
           ctx.history.push(snapshot);
           if (ctx.history.length > 500) ctx.history.splice(0, ctx.history.length - 500);
 
-          // Persist best-effort to MongoDB: insert one doc per segment for the tick
+          // Persist best-effort to MongoDB: insert one doc per segment for the tick (fire-and-forget)
           (async () => {
             try {
               const docs = snapshot.features.map(f => ({
@@ -147,10 +147,12 @@ class TrafficStore {
                 timestamp: new Date(snapshot.timestamp),
                 city: snapshot.city,
               }));
-              await TrafficRecord.insertMany(docs, { ordered: false });
+              const inserted = await TrafficRecord.insertMany(docs, { ordered: false });
+              // Success log (compact to avoid log bloat)
+              logger.info({ msg: 'Persist scheduled snapshot success', city: snapshot.city, timestamp: snapshot.timestamp, insertedCount: inserted?.length ?? docs.length });
             } catch (err) {
-              // Do not fail scheduler if DB unavailable
-              logger.warn({ msg: 'Persist scheduled snapshot failed', error: err.message });
+              // Do not fail scheduler if DB unavailable; warn and continue
+              logger.warn({ msg: 'Persist scheduled snapshot failed', city: snapshot.city, error: err.message });
             }
           })();
         });
@@ -235,7 +237,7 @@ class TrafficStore {
       ctx.lastSnapshot = snap;
       ctx.history.push(snap);
       if (ctx.history.length > 500) ctx.history.splice(0, ctx.history.length - 500);
-      // Best-effort persistence for this first immediate snapshot
+      // Best-effort persistence for this first immediate snapshot (fire-and-forget)
       (async () => {
         try {
           const docs = snap.features.map(f => ({
@@ -246,9 +248,10 @@ class TrafficStore {
             timestamp: new Date(snap.timestamp),
             city: snap.city,
           }));
-          await TrafficRecord.insertMany(docs, { ordered: false });
+          const inserted = await TrafficRecord.insertMany(docs, { ordered: false });
+          logger.info({ msg: 'Persist initial simulated snapshot success', city: snap.city, timestamp: snap.timestamp, insertedCount: inserted?.length ?? docs.length });
         } catch (err) {
-          logger.warn({ msg: 'Persist initial simulated snapshot failed', error: err.message });
+          logger.warn({ msg: 'Persist initial simulated snapshot failed', city: snap.city, error: err.message });
         }
       })();
     }

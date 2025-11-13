@@ -180,7 +180,7 @@ async function fetchRealTimeCity(city) {
     }
   };
 
-  // Persist best-effort to MongoDB using our normalized record
+  // Persist best-effort to MongoDB using our normalized record (fire-and-forget)
   (async () => {
     try {
       const docs = snapshot.features.map(f => ({
@@ -191,9 +191,10 @@ async function fetchRealTimeCity(city) {
         timestamp: new Date(snapshot.timestamp),
         city: snapshot.city,
       }));
-      await TrafficRecord.insertMany(docs, { ordered: false });
+      const inserted = await TrafficRecord.insertMany(docs, { ordered: false });
+      logger.info({ msg: 'Persist real snapshot success', city: snapshot.city, timestamp: snapshot.timestamp, insertedCount: inserted?.length ?? docs.length });
     } catch (err) {
-      logger.warn({ msg: 'Persist real snapshot failed', error: err.message });
+      logger.warn({ msg: 'Persist real snapshot failed', city: snapshot.city, error: err.message });
     }
   })();
 
