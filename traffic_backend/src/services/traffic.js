@@ -81,11 +81,15 @@ function lerp(a, b, t) { return a + (b - a) * t; }
 // In-memory datastore keyed by city for the session
 class TrafficStore {
   constructor() {
-    this.cities = new Map(); // city -> { segments, history: [] }
+    this.cities = new Map(); // city -> { segments, history: [], lastSnapshot }
     // Pre-seed supported cities for deterministic segment generation per city
     for (const city of Object.keys(CITY_BBOX)) {
       this._ensureCity(city);
     }
+
+    // Start periodic updater for simulated snapshots every 10 seconds
+    this._tickIntervalMs = 10_000;
+    this._startScheduler();
   }
 
   _ensureCity(city) {
@@ -94,33 +98,53 @@ class TrafficStore {
       const seed = (Date.now() % 100000) + normalized.length * 9973;
       this.cities.set(normalized, {
         segments: generateSegmentsForCity(normalized, seed),
-        history: []
+        history: [],
+        lastSnapshot: null
       });
     }
     return this.cities.get(normalized);
   }
 
-  /**
-   * Get live snapshot for a city.
-   * If TOMTOM_API_KEY is configured, attempts real data via TomTom; falls back to simulation on error.
-   */
-  async getLiveSnapshot(cityInput) {
-    const city = normalizeCity(cityInput);
-    // Try TomTom if API key present
-    if (process.env.TOMTOM_API_KEY) {
+  _startScheduler() {
+    // Only simulate periodically; when TOMTOM_API_KEY exists, we keep on-demand fetch for /live.
+    setInterval(() => {
       try {
-        const tt = await fetchRealTimeCity(city);
-        // Keep minimal in-memory history for predictions
-        const ctx = this._ensureCity(city);
-        ctx.history.push(tt);
-        if (ctx.history.length > 500) ctx.history.splice(0, ctx.history.length - 500);
-        return tt;
-      } catch (e) {
-        logger.warn({ msg: 'TomTom real data failed, falling back to simulation', city, error: e.message });
-      }
-    }
+        // Update all supported cities
+        Object.keys(CITY_BBOX).forEach((city) => {
+          // When running in simulated mode, update every tick.
+          if (!process.env.TOMTOM_API_KEY) {
+            const snapshot = this._buildSimulatedSnapshot(city);
+            const ctx = this._ensureCity(city);
+            ctx.lastSnapshot = snapshot;
+            ctx.history.push(snapshot);
+            if (ctx.history.length > 500) ctx.history.splice(0, ctx.history.length - 500);
 
-    // Simulation fallback
+            // Persist best-effort to MongoDB
+            (async () => {
+              try {
+                const docs = snapshot.features.map(f => ({
+                  segmentId: f.id,
+                  location: { type: 'LineString', coordinates: f.coordinates },
+                  avgSpeed: f.speedKph,
+                  congestionLevel: f.congestion,
+                  timestamp: new Date(snapshot.timestamp),
+                  city: snapshot.city,
+                }));
+                await TrafficRecord.insertMany(docs, { ordered: false });
+              } catch (err) {
+                logger.warn({ msg: 'Persist scheduled snapshot failed', error: err.message });
+              }
+            })();
+          }
+        });
+      } catch (e) {
+        logger.error({ msg: 'Scheduled simulation update error', error: e.message });
+      }
+    }, this._tickIntervalMs);
+  }
+
+  _buildSimulatedSnapshot(cityInput) {
+    const city = normalizeCity(cityInput);
     const ctx = this._ensureCity(city);
 
     const now = new Date();
@@ -132,7 +156,8 @@ class TrafficStore {
     const pattern = Math.min(1, peak1 + peak2 + 0.2); // ensure some base flow
 
     const features = ctx.segments.map(seg => {
-      const noise = (Math.random() - 0.5) * 0.2;
+      // Add mild random noise each tick to simulate changing conditions
+      const noise = (Math.random() - 0.5) * 0.25;
       const density = Math.max(5, seg.baseDensity * (0.6 + pattern + noise)); // vehicles/km
       // Simple speed model inverse to density
       const speed = Math.max(5, seg.baseSpeedKph * (1.2 - 0.6 * (density / (seg.baseDensity + 30))));
@@ -147,38 +172,63 @@ class TrafficStore {
       };
     });
 
-    const snapshot = {
+    return {
       city,
       timestamp: now.toISOString(),
       features,
-      incidents: [], // placeholder for incident markers; ensures consistent response fields
+      incidents: [],
       source: 'simulated',
     };
+  }
 
-    // Store in per-city history (keep last 500)
-    ctx.history.push(snapshot);
-    if (ctx.history.length > 500) {
-      ctx.history.splice(0, ctx.history.length - 500);
+  /**
+   * Get live snapshot for a city.
+   * If TOMTOM_API_KEY is configured, attempts real data via TomTom; falls back to simulation on error.
+   * If running simulation, returns the latest scheduled snapshot (or generates one if not yet available).
+   */
+  async getLiveSnapshot(cityInput) {
+    const city = normalizeCity(cityInput);
+
+    // Try TomTom if API key present (on-demand)
+    if (process.env.TOMTOM_API_KEY) {
+      try {
+        const tt = await fetchRealTimeCity(city);
+        const ctx = this._ensureCity(city);
+        ctx.lastSnapshot = tt;
+        ctx.history.push(tt);
+        if (ctx.history.length > 500) ctx.history.splice(0, ctx.history.length - 500);
+        return tt;
+      } catch (e) {
+        logger.warn({ msg: 'TomTom real data failed, falling back to simulation', city, error: e.message });
+      }
     }
 
-    // Best-effort persistence to MongoDB: create one record per segment
-    (async () => {
-      try {
-        const docs = snapshot.features.map(f => ({
-          segmentId: f.id,
-          location: { type: 'LineString', coordinates: f.coordinates },
-          avgSpeed: f.speedKph,
-          congestionLevel: f.congestion,
-          timestamp: new Date(snapshot.timestamp),
-          city: snapshot.city,
-        }));
-        await TrafficRecord.insertMany(docs, { ordered: false });
-      } catch (err) {
-        logger.warn({ msg: 'Persist live snapshot failed', error: err.message });
-      }
-    })();
-
-    return snapshot;
+    // Simulation mode: return the most recent scheduled snapshot
+    const ctx = this._ensureCity(city);
+    if (!ctx.lastSnapshot) {
+      // If scheduler hasn't produced one yet, build one immediately
+      const snap = this._buildSimulatedSnapshot(city);
+      ctx.lastSnapshot = snap;
+      ctx.history.push(snap);
+      if (ctx.history.length > 500) ctx.history.splice(0, ctx.history.length - 500);
+      // best-effort persist
+      (async () => {
+        try {
+          const docs = snap.features.map(f => ({
+            segmentId: f.id,
+            location: { type: 'LineString', coordinates: f.coordinates },
+            avgSpeed: f.speedKph,
+            congestionLevel: f.congestion,
+            timestamp: new Date(snap.timestamp),
+            city: snap.city,
+          }));
+          await TrafficRecord.insertMany(docs, { ordered: false });
+        } catch (err) {
+          logger.warn({ msg: 'Persist initial simulated snapshot failed', error: err.message });
+        }
+      })();
+    }
+    return ctx.lastSnapshot;
   }
 
   // PUBLIC_INTERFACE
