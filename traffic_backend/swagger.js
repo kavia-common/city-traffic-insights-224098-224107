@@ -4,12 +4,17 @@ const options = {
   definition: {
     openapi: '3.0.0',
     info: {
-      title: 'My Express API',
+      title: 'Traffic Insights API',
       version: '1.0.0',
-      description: 'A simple Express API documented with Swagger',
-    }
+      description: 'Simulated live traffic, history, and predictions',
+    },
+    servers: [{ url: 'http://localhost:3001' }],
+    tags: [
+      { name: 'Health', description: 'Service health' },
+      { name: 'Traffic', description: 'Live traffic, history and predictions' }
+    ]
   },
-  apis: ['./src/routes/*.js'], // Path to the API docs
+  apis: ['./src/routes/*.js'], // Path to route API docs
 };
 
 const swaggerSpec = swaggerJSDoc(options);

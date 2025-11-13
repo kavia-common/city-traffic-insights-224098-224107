@@ -1,55 +1,108 @@
+'use strict';
+
 const cors = require('cors');
 const express = require('express');
-const routes = require('./routes');
+const helmet = require('helmet');
+const rateLimit = require('express-rate-limit');
+const morgan = require('morgan');
 const swaggerUi = require('swagger-ui-express');
 const swaggerSpec = require('../swagger');
+const config = require('./config');
+const logger = require('./logger');
+
+const healthController = require('./controllers/health');
+const trafficRoutes = require('./routes/traffic');
+const routes = require('./routes');
 
 // Initialize express app
 const app = express();
 
+// Trust proxy (behind load balancers)
+app.set('trust proxy', config.trustProxy);
+
+// Security headers
+app.use(helmet({
+  crossOriginResourcePolicy: { policy: 'cross-origin' }
+}));
+
+// CORS - restricted to frontend origin if provided
 app.use(cors({
-  origin: '*',
-  methods: ['GET', 'POST', 'PUT', 'DELETE', 'PATCH', 'OPTIONS'],
+  origin: (origin, callback) => {
+    if (!config.frontendOrigin || config.frontendOrigin === '*' || !origin) {
+      return callback(null, true);
+    }
+    if (origin === config.frontendOrigin) {
+      return callback(null, true);
+    }
+    // Allow same-origin tools and localhost dev convenience
+    if (origin.includes('localhost') || origin.includes('127.0.0.1')) {
+      return callback(null, true);
+    }
+    return callback(new Error('Not allowed by CORS'));
+  },
+  credentials: true,
+  methods: ['GET', 'OPTIONS'],
   allowedHeaders: ['Content-Type', 'Authorization']
 }));
-app.set('trust proxy', true);
-app.use('/docs', swaggerUi.serve, (req, res, next) => {
-  const host = req.get('host');           // may or may not include port
-  let protocol = req.protocol;          // http or https
 
-  const actualPort = req.socket.localPort;
-  const hasPort = host.includes(':');
-  
-  const needsPort =
-    !hasPort &&
-    ((protocol === 'http' && actualPort !== 80) ||
-     (protocol === 'https' && actualPort !== 443));
-  const fullHost = needsPort ? `${host}:${actualPort}` : host;
-  protocol = req.secure ? 'https' : protocol;
+// Logging HTTP with morgan -> winston
+app.use(morgan('combined', {
+  stream: {
+    write: (message) => logger.http ? logger.http(message.trim()) : logger.info(message.trim())
+  }
+}));
 
-  const dynamicSpec = {
-    ...swaggerSpec,
-    servers: [
-      {
-        url: `${protocol}://${fullHost}`,
-      },
-    ],
-  };
-  swaggerUi.setup(dynamicSpec)(req, res, next);
-});
-
-// Parse JSON request body
+// JSON body
 app.use(express.json());
 
-// Mount routes
+// Rate limiting for /api/traffic/*
+const limiter = rateLimit({
+  windowMs: config.rateLimit.windowMs,
+  max: config.rateLimit.max,
+  standardHeaders: true,
+  legacyHeaders: false,
+});
+app.use('/api/traffic', limiter);
+
+// Swagger Docs with dynamic server URL
+app.use('/api/docs', swaggerUi.serve, (req, res, next) => {
+  const host = req.get('host');
+  let protocol = req.secure ? 'https' : req.protocol;
+  const spec = {
+    ...swaggerSpec,
+    info: {
+      ...swaggerSpec.info,
+      title: 'Traffic Insights API',
+      description: 'Simulated live traffic and predictions for a sample city',
+      version: '1.0.0'
+    },
+    servers: [{ url: `${protocol}://${host}` }],
+    tags: [
+      { name: 'Health', description: 'Service health' },
+      { name: 'Traffic', description: 'Live traffic, history and predictions' }
+    ]
+  };
+  swaggerUi.setup(spec, { explorer: true })(req, res, next);
+});
+
+// Health route
+app.get('/api/health', healthController.check.bind(healthController));
+
+// Traffic routes
+app.use('/api/traffic', trafficRoutes);
+
+// Keep existing root routes (if any)
 app.use('/', routes);
 
-// Error handling middleware
+// Centralized error handling
+// eslint-disable-next-line no-unused-vars
 app.use((err, req, res, next) => {
-  console.error(err.stack);
-  res.status(500).json({
-    status: 'error',
-    message: 'Internal Server Error',
+  logger.error({ msg: 'Unhandled error', error: err.message, stack: err.stack });
+  res.status(err.status || 500).json({
+    error: {
+      code: err.code || 'INTERNAL_ERROR',
+      message: err.message || 'Internal Server Error'
+    }
   });
 });
 

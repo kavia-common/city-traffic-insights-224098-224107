@@ -1,19 +1,22 @@
+'use strict';
 const app = require('./app');
+const config = require('./config');
+const logger = require('./logger');
 
-const PORT = process.env.PORT || 3000;
+const PORT = config.port;
 const HOST = process.env.HOST || '0.0.0.0';
 
 const server = app.listen(PORT, HOST, () => {
-  console.log(`Server running at http://${HOST}:${PORT}`);
+  logger.info({ msg: 'Server running', host: HOST, port: PORT, env: config.env });
 });
 
-  // Graceful shutdown
-  process.on('SIGTERM', () => {
-    console.log('SIGTERM signal received: closing HTTP server');
-    server.close(() => {
-      console.log('HTTP server closed');
-      process.exit(0);
-    });
+// Graceful shutdown
+process.on('SIGTERM', () => {
+  logger.warn('SIGTERM signal received: closing HTTP server');
+  server.close(() => {
+    logger.info('HTTP server closed');
+    process.exit(0);
   });
+});
 
 module.exports = server;
