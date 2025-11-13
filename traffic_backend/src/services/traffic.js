@@ -4,7 +4,11 @@ const logger = require('../logger');
 const TrafficRecord = require('../models/TrafficRecord');
 const { fetchRealTimeCity } = require('./realTrafficService');
 
-// Supported cities and their rough bounding boxes (used for simulation fallback)
+/**
+ * Supported cities and their rough bounding boxes (used for simulation fallback).
+ * Each city's simulated road network is generated once and then reused while live values
+ * (avgSpeed, congestion, density) are updated by a background scheduler every 10 seconds.
+ */
 const CITY_BBOX = {
   Bangalore: { minLat: 12.85, maxLat: 13.12, minLng: 77.45, maxLng: 77.75 },
   Mumbai: { minLat: 18.88, maxLat: 19.30, minLng: 72.75, maxLng: 72.99 },
@@ -13,6 +17,11 @@ const CITY_BBOX = {
 
 const DEFAULT_CITY = 'Bangalore';
 
+/**
+ * PUBLIC_INTERFACE
+ * normalizeCity
+ * Normalize a city input into one of the supported enum values.
+ */
 function normalizeCity(input) {
   if (!input) return DEFAULT_CITY;
   const v = String(input).trim().toLowerCase();
@@ -23,6 +32,8 @@ function normalizeCity(input) {
 }
 
 /**
+ * PUBLIC_INTERFACE
+ * validateCity
  * Validate raw city input against allowed enum values.
  * Returns { valid: boolean, normalized?: string, error?: string }
  */
@@ -87,7 +98,7 @@ class TrafficStore {
       this._ensureCity(city);
     }
 
-    // Start periodic updater for simulated snapshots every 10 seconds
+    // Start periodic updater for simulated snapshots every 10 seconds (hard requirement)
     this._tickIntervalMs = 10_000;
     this._startScheduler();
   }
@@ -105,37 +116,43 @@ class TrafficStore {
     return this.cities.get(normalized);
   }
 
+  /**
+   * Starts a background scheduler that updates each city's simulated snapshot every 10 seconds.
+   * - Randomizes avgSpeed and congestion per segment in a realistic manner.
+   * - Persists best-effort to MongoDB (no-fail).
+   * - Maintains recent history in-memory for /api/traffic/history fallback.
+   */
   _startScheduler() {
-    // Only simulate periodically; when TOMTOM_API_KEY exists, we keep on-demand fetch for /live.
     setInterval(() => {
       try {
-        // Update all supported cities
         Object.keys(CITY_BBOX).forEach((city) => {
-          // When running in simulated mode, update every tick.
-          if (!process.env.TOMTOM_API_KEY) {
-            const snapshot = this._buildSimulatedSnapshot(city);
-            const ctx = this._ensureCity(city);
-            ctx.lastSnapshot = snapshot;
-            ctx.history.push(snapshot);
-            if (ctx.history.length > 500) ctx.history.splice(0, ctx.history.length - 500);
-
-            // Persist best-effort to MongoDB
-            (async () => {
-              try {
-                const docs = snapshot.features.map(f => ({
-                  segmentId: f.id,
-                  location: { type: 'LineString', coordinates: f.coordinates },
-                  avgSpeed: f.speedKph,
-                  congestionLevel: f.congestion,
-                  timestamp: new Date(snapshot.timestamp),
-                  city: snapshot.city,
-                }));
-                await TrafficRecord.insertMany(docs, { ordered: false });
-              } catch (err) {
-                logger.warn({ msg: 'Persist scheduled snapshot failed', error: err.message });
-              }
-            })();
+          // In real-data mode, don't auto-fetch; we still keep history for any prior snapshots.
+          if (process.env.TOMTOM_API_KEY) {
+            return;
           }
+          const snapshot = this._buildSimulatedSnapshot(city);
+          const ctx = this._ensureCity(city);
+          ctx.lastSnapshot = snapshot;
+          ctx.history.push(snapshot);
+          if (ctx.history.length > 500) ctx.history.splice(0, ctx.history.length - 500);
+
+          // Persist best-effort to MongoDB: insert one doc per segment for the tick
+          (async () => {
+            try {
+              const docs = snapshot.features.map(f => ({
+                segmentId: f.id,
+                location: { type: 'LineString', coordinates: f.coordinates },
+                avgSpeed: f.speedKph,
+                congestionLevel: f.congestion,
+                timestamp: new Date(snapshot.timestamp),
+                city: snapshot.city,
+              }));
+              await TrafficRecord.insertMany(docs, { ordered: false });
+            } catch (err) {
+              // Do not fail scheduler if DB unavailable
+              logger.warn({ msg: 'Persist scheduled snapshot failed', error: err.message });
+            }
+          })();
         });
       } catch (e) {
         logger.error({ msg: 'Scheduled simulation update error', error: e.message });
@@ -143,6 +160,10 @@ class TrafficStore {
     }, this._tickIntervalMs);
   }
 
+  /**
+   * Builds a single simulated snapshot for a city with per-segment randomization.
+   * Period-of-day pattern drives density and speed, plus short-term randomness (noise).
+   */
   _buildSimulatedSnapshot(cityInput) {
     const city = normalizeCity(cityInput);
     const ctx = this._ensureCity(city);
@@ -150,25 +171,27 @@ class TrafficStore {
     const now = new Date();
     const minuteOfDay = now.getHours() * 60 + now.getMinutes();
 
-    // Traffic pattern: peak at 9:00 and 18:00, low at night
+    // Traffic pattern: peaks near 9:00 and 18:00, low at night
     const peak1 = gaussianPeak(minuteOfDay, 9 * 60, 120);
     const peak2 = gaussianPeak(minuteOfDay, 18 * 60, 120);
     const pattern = Math.min(1, peak1 + peak2 + 0.2); // ensure some base flow
 
     const features = ctx.segments.map(seg => {
-      // Add mild random noise each tick to simulate changing conditions
-      const noise = (Math.random() - 0.5) * 0.25;
+      // Per-tick random variance to keep values changing every 10s
+      const noise = (Math.random() - 0.5) * 0.3; // ±0.15 influence
       const density = Math.max(5, seg.baseDensity * (0.6 + pattern + noise)); // vehicles/km
-      // Simple speed model inverse to density
-      const speed = Math.max(5, seg.baseSpeedKph * (1.2 - 0.6 * (density / (seg.baseDensity + 30))));
-      const congestion = Number((density / 80 + (1 - speed / 80)) / 2).toFixed(3); // 0..1 approximate
+      // Speed inversely related to density with a cap/floor
+      const speed = Math.max(5, seg.baseSpeedKph * (1.25 - 0.65 * (density / (seg.baseDensity + 30))));
+      // Approximate congestion from density and speed; clamp to [0,1]
+      const rawCong = (density / 80 + (1 - speed / 80)) / 2;
+      const congestion = Math.max(0, Math.min(1, Number(rawCong.toFixed(3))));
 
       return {
         id: seg.id,
         coordinates: seg.coordinates,
         speedKph: Number(speed.toFixed(2)),
         densityVpkm: Number(density.toFixed(2)),
-        congestion: Math.max(0, Math.min(1, parseFloat(congestion))),
+        congestion,
       };
     });
 
@@ -182,14 +205,16 @@ class TrafficStore {
   }
 
   /**
-   * Get live snapshot for a city.
-   * If TOMTOM_API_KEY is configured, attempts real data via TomTom; falls back to simulation on error.
-   * If running simulation, returns the latest scheduled snapshot (or generates one if not yet available).
+   * PUBLIC_INTERFACE
+   * getLiveSnapshot
+   * Returns the latest snapshot for the given city.
+   * - In real mode (TOMTOM_API_KEY set), fetches on demand from TomTom and updates memory/history.
+   * - In simulation mode, returns the latest scheduled snapshot (or generates one immediately if none).
    */
   async getLiveSnapshot(cityInput) {
     const city = normalizeCity(cityInput);
 
-    // Try TomTom if API key present (on-demand)
+    // Real data mode: on-demand fetch, then persist and record history
     if (process.env.TOMTOM_API_KEY) {
       try {
         const tt = await fetchRealTimeCity(city);
@@ -203,15 +228,14 @@ class TrafficStore {
       }
     }
 
-    // Simulation mode: return the most recent scheduled snapshot
+    // Simulation mode: serve the most recent scheduled snapshot; if none yet, create one now
     const ctx = this._ensureCity(city);
     if (!ctx.lastSnapshot) {
-      // If scheduler hasn't produced one yet, build one immediately
       const snap = this._buildSimulatedSnapshot(city);
       ctx.lastSnapshot = snap;
       ctx.history.push(snap);
       if (ctx.history.length > 500) ctx.history.splice(0, ctx.history.length - 500);
-      // best-effort persist
+      // Best-effort persistence for this first immediate snapshot
       (async () => {
         try {
           const docs = snap.features.map(f => ({
@@ -286,13 +310,14 @@ class TrafficStore {
     };
   }
 
-  // PUBLIC_INTERFACE
+  /**
+   * PUBLIC_INTERFACE
+   * getDbHistory
+   * Fetches last N persisted records (or range) from MongoDB and returns a default aggregated response:
+   * { city, from, to, count, segments: [{ id, coordinates, avgSpeedKph, avgCongestion, samples }] }
+   * The controller may transform this to format=points on request; this method always returns the default aggregate.
+   */
   async getDbHistory({ fromISO, toISO, limit = 50, city = DEFAULT_CITY } = {}) {
-    /**
-     * Fetches last N persisted records (or range) from MongoDB and returns a default aggregated response:
-     * { city, from, to, count, segments: [{ id, coordinates, avgSpeedKph, avgCongestion, samples }] }
-     * The controller may transform this to format=points on request; this method always returns the default aggregate.
-     */
     const normalized = normalizeCity(city);
     const query = { city: normalized };
     if (fromISO || toISO) {
@@ -327,7 +352,6 @@ class TrafficStore {
       v.speedSum += d.avgSpeed;
       v.congestionSum += d.congestionLevel;
       v.n += 1;
-      // prefer to keep coordinates as first seen
       byId.set(id, v);
     }
 
@@ -348,7 +372,11 @@ class TrafficStore {
     };
   }
 
-  // Very simple prediction: trend + time-of-day pattern adjustment
+  /**
+   * PUBLIC_INTERFACE
+   * predictShortTerm
+   * Very simple prediction: trend + time-of-day pattern adjustment with slight random drift.
+   */
   predictShortTerm(horizonMinutes = 15, cityInput) {
     const city = normalizeCity(cityInput);
     const ctx = this._ensureCity(city);
@@ -360,30 +388,27 @@ class TrafficStore {
     // last sample for the city or synthetic
     const latest = ctx.history[ctx.history.length - 1] || null;
 
-    // If there is no history yet and real mode is enabled, try to seed it
     const baseSnapshot = latest;
-    const features = (baseSnapshot?.features || ctx.segments.map(seg => {
-      // create a synthetic base point
-      return {
-        id: seg.id,
-        coordinates: seg.coordinates,
-        speedKph: seg.baseSpeedKph,
-        densityVpkm: seg.baseDensity,
-        congestion: 0.3,
-      };
-    })).map(f => {
+    const features = (baseSnapshot?.features || ctx.segments.map(seg => ({
+      id: seg.id,
+      coordinates: seg.coordinates,
+      speedKph: seg.baseSpeedKph,
+      densityVpkm: seg.baseDensity,
+      congestion: 0.3,
+    }))).map(f => {
       // drift a little towards upcoming pattern: more density during peak leads to lower speeds
       const driftDensity = f.densityVpkm * (0.9 + 0.3 * pattern);
       const predictedDensity = Math.max(5, driftDensity + (Math.random() - 0.5) * 2);
       const predictedSpeed = Math.max(5, f.speedKph * (1.05 - 0.3 * pattern) + (Math.random() - 0.5) * 2);
-      const congestion = Number((predictedDensity / 80 + (1 - predictedSpeed / 80)) / 2).toFixed(3);
+      const rawCong = (predictedDensity / 80 + (1 - predictedSpeed / 80)) / 2;
+      const congestion = Math.max(0, Math.min(1, Number(rawCong.toFixed(3))));
 
       return {
         id: f.id,
         coordinates: f.coordinates,
         speedKph: Number(predictedSpeed.toFixed(2)),
         densityVpkm: Number(predictedDensity.toFixed(2)),
-        congestion: Math.max(0, Math.min(1, parseFloat(congestion))),
+        congestion,
       };
     });
 
