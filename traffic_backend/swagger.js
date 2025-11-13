@@ -12,7 +12,20 @@ const options = {
     tags: [
       { name: 'Health', description: 'Service health' },
       { name: 'Traffic', description: 'Live traffic, history and predictions' }
-    ]
+    ],
+    components: {
+      parameters: {
+        CityParam: {
+          in: 'query',
+          name: 'city',
+          schema: {
+            type: 'string',
+            enum: ['Bangalore', 'Mumbai', 'Delhi']
+          },
+          description: 'City to query (default Bangalore)'
+        }
+      }
+    }
   },
   apis: ['./src/routes/*.js'], // Path to route API docs
 };

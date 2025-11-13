@@ -22,6 +22,24 @@ function normalizeCity(input) {
   return DEFAULT_CITY;
 }
 
+/**
+ * Validate raw city input against allowed enum values.
+ * Returns { valid: boolean, normalized?: string, error?: string }
+ */
+function validateCity(raw) {
+  if (raw === undefined || raw === null || String(raw).trim() === '') {
+    // Missing means default is allowed
+    return { valid: true, normalized: DEFAULT_CITY };
+  }
+  const normalized = normalizeCity(raw);
+  const allowed = ['Bangalore', 'Mumbai', 'Delhi'];
+  if (!allowed.includes(normalized)) {
+    const msg = 'city must be one of: Bangalore, Mumbai, Delhi';
+    return { valid: false, error: msg };
+  }
+  return { valid: true, normalized };
+}
+
 // Build a set of simulated road segments between random nearby coordinates for a city
 function generateSegmentsForCity(city, seed = 24) {
   const bbox = CITY_BBOX[city] || CITY_BBOX[DEFAULT_CITY];
@@ -341,4 +359,5 @@ module.exports = {
   getDbHistory: store.getDbHistory.bind(store),
   normalizeCity,
   DEFAULT_CITY,
+  validateCity,
 };

@@ -1,6 +1,6 @@
 'use strict';
 
-const { store, getDbHistory, normalizeCity, DEFAULT_CITY } = require('../services/traffic');
+const { store, getDbHistory, normalizeCity, DEFAULT_CITY, validateCity } = require('../services/traffic');
 const logger = require('../logger');
 
 /**
@@ -11,7 +11,11 @@ class TrafficController {
   async live(req, res) {
     /** Returns live traffic snapshot suitable for map overlays (LineString-like). */
     try {
-      const city = normalizeCity(req.query.city);
+      const v = validateCity(req.query.city);
+      if (!v.valid) {
+        return res.status(400).json({ error: { code: 'VALIDATION_ERROR', message: v.error } });
+      }
+      const city = v.normalized || normalizeCity(req.query.city);
       const snapshot = await store.getLiveSnapshot(city);
       // Ensure incidents array exists for contract consistency
       if (!Array.isArray(snapshot.incidents)) {
@@ -34,7 +38,11 @@ class TrafficController {
      */
     try {
       const { from, to } = req.query;
-      const city = normalizeCity(req.query.city || DEFAULT_CITY);
+      const v = validateCity(req.query.city);
+      if (!v.valid) {
+        return res.status(400).json({ error: { code: 'VALIDATION_ERROR', message: v.error } });
+      }
+      const city = v.normalized || normalizeCity(req.query.city || DEFAULT_CITY);
       const format = (req.query.format || '').toString().toLowerCase();
 
       if (from && isNaN(Date.parse(from))) {
@@ -114,7 +122,11 @@ class TrafficController {
         }
         horizon = Math.floor(parsed);
       }
-      const city = normalizeCity(req.query.city || DEFAULT_CITY);
+      const v = validateCity(req.query.city);
+      if (!v.valid) {
+        return res.status(400).json({ error: { code: 'VALIDATION_ERROR', message: v.error } });
+      }
+      const city = v.normalized || normalizeCity(req.query.city || DEFAULT_CITY);
       const data = store.predictShortTerm(horizon, city);
       res.status(200).json(data);
     } catch (err) {
