@@ -12,6 +12,7 @@ const logger = require('./logger');
 
 const healthController = require('./controllers/health');
 const trafficRoutes = require('./routes/traffic');
+const selfTestRoutes = require('./routes/selfTest');
 const routes = require('./routes');
 const mongoClient = require('./db/mongo');
 
@@ -96,8 +97,12 @@ app.use('/api/docs', swaggerUi.serve, (req, res, next) => {
 // Health route
 app.get('/api/health', healthController.check.bind(healthController));
 
-// Traffic routes
+ // Traffic routes
 app.use('/api/traffic', trafficRoutes);
+
+// Self-test under both /api/traffic/self-test and /api/self-test
+app.use('/api/traffic', selfTestRoutes);
+app.use('/api', selfTestRoutes);
 
 // Keep existing root routes (if any)
 app.use('/', routes);

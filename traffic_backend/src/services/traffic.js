@@ -19,6 +19,29 @@ const CITY_BBOX = {
 
 const DEFAULT_CITY = 'Bangalore';
 
+// In-memory scheduler metrics
+let _tickCount = 0;
+const _cityLastTick = {
+  Bangalore: null,
+  Mumbai: null,
+  Delhi: null,
+};
+
+// PUBLIC_INTERFACE
+function getSchedulerMetrics() {
+  /**
+   * Returns in-memory scheduler metrics used by self-test endpoint.
+   * mode: 'simulated' when TOMTOM_API_KEY is not set; otherwise 'tomtom'
+   * tickCount: number of scheduler ticks since process start
+   * cityLastTick: map of city -> last tick timestamp in ms (or null)
+   */
+  return {
+    mode: process.env.TOMTOM_API_KEY ? 'tomtom' : 'simulated',
+    tickCount: _tickCount,
+    cityLastTick: { ..._cityLastTick }
+  };
+}
+
 /**
  * PUBLIC_INTERFACE
  * normalizeCity
@@ -131,16 +154,22 @@ class TrafficStore {
   _startScheduler() {
     setInterval(() => {
       try {
+        // Only simulate when TOMTOM is not being used
+        if (process.env.TOMTOM_API_KEY) {
+          return;
+        }
+        _tickCount += 1;
+        const now = Date.now();
+
         Object.keys(CITY_BBOX).forEach((city) => {
-          // In real-data mode, don't auto-fetch; we still keep history for any prior snapshots.
-          if (process.env.TOMTOM_API_KEY) {
-            return;
-          }
           const snapshot = this._buildSimulatedSnapshot(city);
           const ctx = this._ensureCity(city);
           ctx.lastSnapshot = snapshot;
           ctx.history.push(snapshot);
           if (ctx.history.length > 500) ctx.history.splice(0, ctx.history.length - 500);
+
+          // track last tick per city
+          _cityLastTick[city] = now;
 
           // Persist best-effort: prefer MongoDB, fallback to local JSON store
           (async () => {
@@ -728,4 +757,5 @@ module.exports = {
   normalizeCity,
   DEFAULT_CITY,
   validateCity,
+  getSchedulerMetrics,
 };

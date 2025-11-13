@@ -31,4 +31,41 @@ const options = {
 };
 
 const swaggerSpec = swaggerJSDoc(options);
+
+// Add self-test endpoint path dynamically so it shows up in docs even before static spec regeneration.
+swaggerSpec.paths = swaggerSpec.paths || {};
+swaggerSpec.paths['/api/traffic/self-test'] = {
+  get: {
+    summary: 'Self-test: verify scheduler is running and observe last ticks',
+    description: 'Returns server timestamp, mode (simulated or tomtom), global tick count, and per-city last tick timestamps.',
+    tags: ['Health'],
+    responses: {
+      200: {
+        description: 'Scheduler status metrics',
+        content: {
+          'application/json': {
+            schema: {
+              type: 'object',
+              properties: {
+                serverTimestamp: { type: 'string', format: 'date-time' },
+                mode: { type: 'string', enum: ['simulated', 'tomtom'] },
+                tickCount: { type: 'integer' },
+                cities: {
+                  type: 'object',
+                  additionalProperties: {
+                    type: 'object',
+                    properties: {
+                      lastTickTimestamp: { type: 'string', format: 'date-time', nullable: true }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+};
+
 module.exports = swaggerSpec;
