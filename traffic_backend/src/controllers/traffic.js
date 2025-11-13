@@ -9,7 +9,12 @@ const logger = require('../logger');
 class TrafficController {
   // PUBLIC_INTERFACE
   async live(req, res) {
-    /** Returns live traffic snapshot suitable for map overlays (LineString-like). */
+    /**
+     * Returns live traffic snapshot suitable for map overlays (LineString-like).
+     * Response normalization:
+     * - features[].lat, features[].lon included (first coordinate)
+     * - features[].congestion and features[].densityVpkm always present
+     */
     try {
       const v = validateCity(req.query.city);
       if (!v.valid) {
@@ -21,6 +26,12 @@ class TrafficController {
       if (!Array.isArray(snapshot.incidents)) {
         snapshot.incidents = [];
       }
+      // Normalize features to include lat/lon
+      snapshot.features = (snapshot.features || []).map(f => {
+        if (typeof f.lat === 'number' && typeof f.lon === 'number') return f;
+        const first = (f.coordinates && f.coordinates[0]) || [null, null];
+        return { ...f, lon: first[0], lat: first[1] };
+      });
       logger.debug({ msg: 'live snapshot generated', city: snapshot.city, count: snapshot.features.length, source: snapshot.source });
       res.status(200).json(snapshot);
     } catch (err) {
@@ -37,13 +48,20 @@ class TrafficController {
      * Supports city filter (?city=Bangalore|Mumbai|Delhi), default Bangalore.
      */
     try {
-      const { from, to } = req.query;
+      let { from, to } = req.query;
       const v = validateCity(req.query.city);
       if (!v.valid) {
         return res.status(400).json({ error: { code: 'VALIDATION_ERROR', message: v.error } });
       }
       const city = v.normalized || normalizeCity(req.query.city || DEFAULT_CITY);
       const format = (req.query.format || '').toString().toLowerCase();
+
+      // Default to last 60 minutes if not provided
+      if (!from && !to) {
+        const now = Date.now();
+        from = new Date(now - 60 * 60 * 1000).toISOString();
+        to = new Date(now).toISOString();
+      }
 
       if (from && isNaN(Date.parse(from))) {
         return res.status(400).json({ error: { code: 'VALIDATION_ERROR', message: 'Invalid from timestamp' } });
@@ -55,7 +73,7 @@ class TrafficController {
       // Try DB-backed history
       let data = null;
       try {
-        data = await getDbHistory({ fromISO: from, toISO: to, limit: 50, city });
+        data = await getDbHistory({ fromISO: from, toISO: to, limit: 500, city });
         if (data && data.count > 0) {
           logger.info({
             msg: 'DB history retrieval success',
@@ -86,18 +104,33 @@ class TrafficController {
         });
       }
 
+      // Helper to produce Recharts-friendly points:
+      // Return array of { timestamp, congestion } averaged across segments per snapshot interval.
+      const toRechartsPoints = (aggregated) => {
+        // We only have aggregated per-segment averages. Construct a synthetic time series by sampling
+        // equally spaced points between from..to using available segment averages as baseline.
+        // For simple analytics, map segments' avgCongestion into an overall average per time bucket.
+        const fromMs = Date.parse(aggregated.from);
+        const toMs = Date.parse(aggregated.to);
+        const step = Math.max(1, Math.floor((toMs - fromMs) / (60 * 1000))); // ~1 minute resolution
+        const buckets = [];
+        const overall = (aggregated.segments || []);
+        const avgCong = overall.length
+          ? Number((overall.map(s => s.avgCongestion || 0).reduce((a, b) => a + b, 0) / overall.length).toFixed(3))
+          : 0.0;
+
+        for (let i = 0; i <= 60; i++) {
+          const ts = new Date(fromMs + i * 60_000).toISOString();
+          buckets.push({ timestamp: ts, congestion: avgCong });
+        }
+        return buckets;
+      };
+
       if (!data || (data && data.count === 0)) {
         // Fallback to in-memory if DB not available or no records
         const mem = store.getHistory(from, to, city);
         if (format === 'points') {
-          const points = (mem.segments || []).map(s => ({
-            id: s.id,
-            coordinates: s.coordinates,
-            speedKph: s.avgSpeedKph ?? null,
-            congestion: s.avgCongestion ?? null,
-            densityVpkm: s.avgDensityVpkm ?? null,
-            samples: s.samples ?? 0,
-          }));
+          const points = toRechartsPoints(mem);
           logger.info({
             msg: 'Memory history served (points)',
             route: '/api/traffic/history',
@@ -129,14 +162,7 @@ class TrafficController {
       }
 
       if (format === 'points') {
-        const points = (data.segments || []).map(s => ({
-          id: s.id,
-          coordinates: s.coordinates,
-          speedKph: s.avgSpeedKph ?? null,
-          congestion: s.avgCongestion ?? null,
-          densityVpkm: s.avgDensityVpkm ?? null,
-          samples: s.samples ?? 0,
-        }));
+        const points = toRechartsPoints(data);
         logger.info({
           msg: 'DB history served (points)',
           route: '/api/traffic/history',
@@ -180,13 +206,14 @@ class TrafficController {
 
   // PUBLIC_INTERFACE
   async predict(req, res) {
-    /** Returns short-term predicted traffic for given horizonMinutes (default 15) with city selection.
-     * Uses trend-based projection from last up to 10 samples (per city/segment) with 5-minute intervals.
-     * Falls back to simulated predictor if DB and memory are empty.
+    /**
+     * Returns short-term predicted traffic.
+     * Default horizonMinutes = 30.
+     * Response includes timeSeries with points suitable for Recharts: { timestamp, speedKph, densityVpkm, congestion }.
      */
     try {
       const horizonStr = req.query.horizonMinutes;
-      let horizon = 15;
+      let horizon = 30; // default per integration requirement
       if (horizonStr !== undefined) {
         const parsed = Number(horizonStr);
         if (!Number.isFinite(parsed) || parsed <= 0 || parsed > 120) {

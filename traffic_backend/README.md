@@ -13,10 +13,10 @@ Endpoints:
 
 When TOMTOM_API_KEY is set, /api/traffic/live fetches TomTom Traffic Flow (flowSegmentData) for the selected city (Bangalore, Mumbai, Delhi). On failure or when not configured, it falls back to simulated data. API response shapes and query params remain the same.
 
-MongoDB persistence (via Mongoose):
+MongoDB persistence (via Mongoose) or JSON fallback:
 - Best-effort persistence of each live snapshot to per-segment records.
-- /api/traffic/history returns last 50 records by default or a filtered range if from/to provided.
-- If DB is unavailable or MONGO_URI not set, falls back to in-memory aggregation.
+- /api/traffic/history defaults to last 60 minutes if no range specified, or filters by `from`/`to` ISO timestamps.
+- If DB is unavailable or MONGO_URI not set, falls back to in-memory aggregation plus local JSON store (data/local_traffic_<city>.json).
 
 Environment configuration is via .env (see .env.example). Defaults to PORT=3001.
 

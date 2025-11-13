@@ -12,8 +12,9 @@ const router = express.Router();
  *     summary: Get live traffic snapshot (real when TOMTOM_API_KEY is set, else simulated)
  *     description: |
  *       Returns a live traffic snapshot for the requested city. When TOMTOM_API_KEY is configured,
- *       the snapshot is sourced from TomTom Traffic Flow; otherwise it is simulated. The "incidents" array
- *       is always present (reserved for future use).
+ *       the snapshot is sourced from TomTom Traffic Flow; otherwise it is simulated.
+ *       The "incidents" array is always present (reserved for future use).
+ *       Each feature contains lat, lon (first coordinate), congestion, and densityVpkm fields.
  *     tags: [Traffic]
  *     parameters:
  *       - $ref: '#/components/parameters/CityParam'
@@ -29,10 +30,11 @@ router.get('/live', trafficController.live.bind(trafficController));
  * @openapi
  * /api/traffic/history:
  *   get:
- *     summary: Get traffic history (DB-backed). Returns last 50 records by default or a filtered range.
+ *     summary: Get traffic history (last 60 minutes by default; DB-backed when available)
  *     description: |
- *       If MongoDB is configured, returns aggregated history from the last 50 persisted records by default,
- *       or filters by time range when `from`/`to` are provided. Falls back to in-memory aggregation when DB is not available.
+ *       If MongoDB is configured, returns aggregated history from the last persisted records or filters by time range when `from`/`to` are provided.
+ *       When parameters are omitted, the default window is the last 60 minutes.
+ *       Falls back to in-memory/local JSON aggregation when DB is not available.
  *     tags: [Traffic]
  *     parameters:
  *       - in: query
@@ -53,7 +55,7 @@ router.get('/live', trafficController.live.bind(trafficController));
  *         schema:
  *           type: string
  *           enum: [points]
- *         description: When set to 'points', returns { format: 'points', points: [{ id, coordinates, speedKph, densityVpkm, congestion, samples }] }
+ *         description: When set to 'points', returns { format: 'points', points: [{ timestamp, congestion }] } suitable for Recharts line charts
  *     responses:
  *       200:
  *         description: Aggregated history or points format based on query
@@ -66,10 +68,11 @@ router.get('/history', trafficController.history.bind(trafficController));
  * @openapi
  * /api/traffic/predict:
  *   get:
- *     summary: Get short-term traffic predictions (simulated)
+ *     summary: Get short-term traffic predictions (default 30 minutes)
  *     description: |
- *       Returns predicted traffic for the specified horizon in minutes for a given city.
+ *       Returns predicted traffic for the specified horizon in minutes for a given city (default 30).
  *       Horizon must be within 1..120 minutes. City must be one of the allowed enum values.
+ *       Response includes timeSeries points per 5-minute steps, each with { timestamp, speedKph, densityVpkm, congestion } for Recharts.
  *     tags: [Traffic]
  *     parameters:
  *       - in: query

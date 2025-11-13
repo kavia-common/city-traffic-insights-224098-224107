@@ -3,6 +3,8 @@
 const logger = require('../logger');
 const TrafficRecord = require('../models/TrafficRecord');
 const { fetchRealTimeCity } = require('./realTrafficService');
+const mongoClient = require('../db/mongo');
+const localStore = require('./localStore');
 
 /**
  * Supported cities and their rough bounding boxes (used for simulation fallback).
@@ -140,23 +142,27 @@ class TrafficStore {
           ctx.history.push(snapshot);
           if (ctx.history.length > 500) ctx.history.splice(0, ctx.history.length - 500);
 
-          // Persist best-effort to MongoDB: insert one doc per segment for the tick (fire-and-forget)
+          // Persist best-effort: prefer MongoDB, fallback to local JSON store
           (async () => {
             try {
-              const docs = snapshot.features.map(f => ({
-                segmentId: f.id,
-                location: { type: 'LineString', coordinates: f.coordinates },
-                avgSpeed: f.speedKph,
-                congestionLevel: f.congestion,
-                timestamp: new Date(snapshot.timestamp),
-                city: snapshot.city,
-              }));
-              const inserted = await TrafficRecord.insertMany(docs, { ordered: false });
-              // Success log (compact to avoid log bloat)
-              logger.info({ msg: 'Persist scheduled snapshot success', city: snapshot.city, timestamp: snapshot.timestamp, insertedCount: inserted?.length ?? docs.length });
+              if (mongoClient && mongoClient._connected) {
+                const docs = snapshot.features.map(f => ({
+                  segmentId: f.id,
+                  location: { type: 'LineString', coordinates: f.coordinates },
+                  avgSpeed: f.speedKph,
+                  congestionLevel: f.congestion,
+                  timestamp: new Date(snapshot.timestamp),
+                  city: snapshot.city,
+                }));
+                const inserted = await TrafficRecord.insertMany(docs, { ordered: false });
+                logger.info({ msg: 'Persist scheduled snapshot success', city: snapshot.city, timestamp: snapshot.timestamp, insertedCount: inserted?.length ?? docs.length });
+              } else {
+                localStore.appendSnapshot(snapshot);
+              }
             } catch (err) {
-              // Do not fail scheduler if DB unavailable; warn and continue
               logger.warn({ msg: 'Persist scheduled snapshot failed', city: snapshot.city, error: err.message });
+              // Fallback to local file on any Mongo error
+              try { localStore.appendSnapshot(snapshot); } catch { /* ignore */ }
             }
           })();
         });
@@ -192,12 +198,16 @@ class TrafficStore {
       const rawCong = (density / 80 + (1 - speed / 80)) / 2;
       const congestion = Math.max(0, Math.min(1, Number(rawCong.toFixed(3))));
 
+      const [lng1, lat1] = seg.coordinates[0] || [null, null];
       return {
         id: seg.id,
         coordinates: seg.coordinates,
         speedKph: Number(speed.toFixed(2)),
         densityVpkm: Number(density.toFixed(2)),
         congestion,
+        // expose first point in feature for analytics convenience
+        lat: lat1,
+        lon: lng1,
       };
     });
 
@@ -227,9 +237,36 @@ class TrafficStore {
       try {
         const tt = await fetchRealTimeCity(city);
         const ctx = this._ensureCity(city);
+        // enrich features with lat/lon convenience fields for analytics
+        tt.features = (tt.features || []).map(f => {
+          const [lng, lat] = (f.coordinates && f.coordinates[0]) || [null, null];
+          return { ...f, lat, lon: lng };
+        });
         ctx.lastSnapshot = tt;
         ctx.history.push(tt);
         if (ctx.history.length > 500) ctx.history.splice(0, ctx.history.length - 500);
+
+        // persist best effort (Mongo preferred, fallback JSON)
+        (async () => {
+          try {
+            if (mongoClient && mongoClient._connected) {
+              const docs = tt.features.map(f => ({
+                segmentId: f.id,
+                location: { type: 'LineString', coordinates: f.coordinates },
+                avgSpeed: f.speedKph ?? 0,
+                congestionLevel: f.congestion,
+                timestamp: new Date(tt.timestamp),
+                city: tt.city,
+              }));
+              await TrafficRecord.insertMany(docs, { ordered: false });
+            } else {
+              localStore.appendSnapshot(tt);
+            }
+          } catch {
+            try { localStore.appendSnapshot(tt); } catch { /* ignore */ }
+          }
+        })();
+
         return tt;
       } catch (e) {
         logger.warn({ msg: 'TomTom real data failed, falling back to simulation', city, error: e.message });
@@ -246,18 +283,23 @@ class TrafficStore {
       // Best-effort persistence for this first immediate snapshot (fire-and-forget)
       (async () => {
         try {
-          const docs = snap.features.map(f => ({
-            segmentId: f.id,
-            location: { type: 'LineString', coordinates: f.coordinates },
-            avgSpeed: f.speedKph,
-            congestionLevel: f.congestion,
-            timestamp: new Date(snap.timestamp),
-            city: snap.city,
-          }));
-          const inserted = await TrafficRecord.insertMany(docs, { ordered: false });
-          logger.info({ msg: 'Persist initial simulated snapshot success', city: snap.city, timestamp: snap.timestamp, insertedCount: inserted?.length ?? docs.length });
+          if (mongoClient && mongoClient._connected) {
+            const docs = snap.features.map(f => ({
+              segmentId: f.id,
+              location: { type: 'LineString', coordinates: f.coordinates },
+              avgSpeed: f.speedKph,
+              congestionLevel: f.congestion,
+              timestamp: new Date(snap.timestamp),
+              city: snap.city,
+            }));
+            const inserted = await TrafficRecord.insertMany(docs, { ordered: false });
+            logger.info({ msg: 'Persist initial simulated snapshot success', city: snap.city, timestamp: snap.timestamp, insertedCount: inserted?.length ?? docs.length });
+          } else {
+            localStore.appendSnapshot(snap);
+          }
         } catch (err) {
           logger.warn({ msg: 'Persist initial simulated snapshot failed', city: snap.city, error: err.message });
+          try { localStore.appendSnapshot(snap); } catch { /* ignore */ }
         }
       })();
     }
@@ -276,8 +318,10 @@ class TrafficStore {
     /** Returns aggregated history from in-memory store for given time range and city */
     const city = normalizeCity(cityInput);
     const ctx = this._ensureCity(city);
-    const from = fromISO ? new Date(fromISO).getTime() : 0;
-    const to = toISO ? new Date(toISO).getTime() : Date.now();
+
+    // Default to last 60 minutes if no from/to provided
+    let from = fromISO ? new Date(fromISO).getTime() : (Date.now() - 60 * 60 * 1000);
+    let to = toISO ? new Date(toISO).getTime() : Date.now();
     if (Number.isNaN(from) || Number.isNaN(to)) {
       const err = new Error('Invalid from/to timestamps');
       err.code = 'VALIDATION_ERROR';
@@ -285,10 +329,34 @@ class TrafficStore {
       throw err;
     }
 
-    const samples = ctx.history.filter(s => {
+    // Augment in-memory with local JSON store if Mongo isn't connected
+    let memSamples = ctx.history.filter(s => {
       const t = new Date(s.timestamp).getTime();
       return t >= from && t <= to;
     });
+
+    // If memory thin, try local store
+    if (!mongoClient || !mongoClient._connected) {
+      try {
+        const extras = localStore.querySnapshots(city, new Date(from).toISOString(), new Date(to).toISOString());
+        if (extras && extras.length) {
+          memSamples = memSamples.concat(extras);
+          // de-duplicate by timestamp string
+          const seen = new Set();
+          memSamples = memSamples.filter(s => {
+            const key = s.timestamp;
+            if (seen.has(key)) return false;
+            seen.add(key);
+            return true;
+          });
+          memSamples.sort((a, b) => new Date(a.timestamp) - new Date(b.timestamp));
+        }
+      } catch {
+        // ignore
+      }
+    }
+
+    const samples = memSamples;
 
     // Aggregate by averaging speed and density per segment
     const byId = new Map();
@@ -450,7 +518,7 @@ class TrafficStore {
    * predict response and includes a timeSeries array for UI charts.
    */
   // PUBLIC_INTERFACE
-  async predictTrendBased(horizonMinutes = 15, cityInput) {
+  async predictTrendBased(horizonMinutes = 30, cityInput) {
     /** Trend-based predictor using last up to 10 points per segment; DB first, memory fallback */
     const city = normalizeCity(cityInput);
     const ctx = this._ensureCity(city);

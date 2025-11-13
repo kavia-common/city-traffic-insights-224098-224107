@@ -1,7 +1,7 @@
 {
   "name": "traffic-backend",
   "version": "1.0.0",
-  "description": "Backend service providing simulated live traffic data and predictions",
+  "description": "Backend service providing simulated/real live traffic data, history, and 30-min predictions with MongoDB or local JSON fallback",
   "main": "src/server.js",
   "scripts": {
     "start": "node src/server.js",
